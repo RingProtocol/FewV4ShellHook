@@ -8,7 +8,6 @@ This package is pre-production. It is not audited, deployed, funded, indexed, or
 
 ## Review material
 
-- [Questions for Uniswap](docs/UNISWAP_DEVELOPER_REVIEW.md)
 - [Design note](docs/FEW_V4_SHELL_HOOK.md)
 - Main contract: `src/FewV4ShellHook.sol`
 - Integration tests: `test/integration/FewV4ShellHook.t.sol`
