@@ -8,6 +8,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IUnlockCallback} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
+import {CustomRevert} from "@uniswap/v4-core/src/libraries/CustomRevert.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
@@ -17,10 +18,16 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 
+import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
+
+import {IPositionManager} from "v4-periphery/src/interfaces/IPositionManager.sol";
 import {IV4Quoter} from "v4-periphery/src/interfaces/IV4Quoter.sol";
+import {Actions} from "v4-periphery/src/libraries/Actions.sol";
 import {HookMiner} from "v4-periphery/src/utils/HookMiner.sol";
+import {Plan, Planner} from "v4-periphery/test/shared/Planner.sol";
 
 import {FewV4ShellHook} from "../../src/FewV4ShellHook.sol";
+import {IAggregatorHook} from "../../src/interfaces/IAggregatorHook.sol";
 import {IFewFactory} from "../../src/interfaces/external/IFewFactory.sol";
 
 /// @dev The v4-core PoolSwapTest helper ABI-decodes ERC20 return values and therefore cannot settle
@@ -76,7 +83,8 @@ contract FewV4ShellHookForkTest is Test {
     using SafeERC20 for IERC20;
     using StateLibrary for IPoolManager;
 
-    uint256 internal constant FORK_BLOCK = 25_833_244;
+    /// @dev Overridable with FORK_BLOCK; set FORK_BLOCK=0 to pin to the RPC head (e.g. a local anvil fork).
+    uint256 internal constant DEFAULT_FORK_BLOCK = 25_833_244;
     address internal constant V4_POOL_MANAGER = 0x000000000004444c5dc75cB358380D2e3dE08A90;
     address internal constant V4_QUOTER = 0x52F0E24D1c21C8A0cB1e5a5dD6198556BD9E1203;
     address internal constant FEW_FACTORY = 0x7D86394139bf1122E82FDF45Bb4e3b038A4464DD;
@@ -84,7 +92,11 @@ contract FewV4ShellHookForkTest is Test {
     address internal constant USDT = 0xdAC17F958D2ee523a2206206994597C13D831ec7;
     address internal constant FW_USDC = 0x0492560FA7Cfd6A85E50D8bE3F77318994F8f429;
     address internal constant FW_USDT = 0xef87f4608e601E8564800265AeE1c1FfaDF73283;
+    address internal constant V4_POSITION_MANAGER = 0xbD216513d74C8cf14cf4747E6AaA6420FF64ee9e;
+    address internal constant PERMIT2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
     address internal constant USER = address(0xBEEF);
+    address internal constant HOOK_OWNER = address(0xA11CE);
+    address internal constant STRANGER = address(0xDEAD);
 
     uint24 internal constant FEE = 500;
     int24 internal constant TICK_SPACING = 10;
@@ -108,7 +120,12 @@ contract FewV4ShellHookForkTest is Test {
     function setUp() public {
         string memory rpc = vm.envOr("ETH_RPC_URL", string(""));
         if (bytes(rpc).length == 0) return;
-        vm.createSelectFork(rpc, FORK_BLOCK);
+        uint256 forkBlock = vm.envOr("FORK_BLOCK", DEFAULT_FORK_BLOCK);
+        if (forkBlock == 0) {
+            vm.createSelectFork(rpc);
+        } else {
+            vm.createSelectFork(rpc, forkBlock);
+        }
         forked = true;
 
         manager = IPoolManager(V4_POOL_MANAGER);
@@ -122,12 +139,24 @@ contract FewV4ShellHookForkTest is Test {
             Hooks.BEFORE_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG
                 | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
         );
-        bytes memory constructorArgs =
-            abi.encode(manager, IFewFactory(FEW_FACTORY), IV4Quoter(V4_QUOTER), allowedInnerPools);
+        bytes memory constructorArgs = abi.encode(
+            manager,
+            IFewFactory(FEW_FACTORY),
+            IV4Quoter(V4_QUOTER),
+            allowedInnerPools,
+            HOOK_OWNER,
+            IPositionManager(V4_POSITION_MANAGER)
+        );
         (address mined, bytes32 salt) =
             HookMiner.find(address(this), flags, type(FewV4ShellHook).creationCode, constructorArgs);
-        hook =
-            new FewV4ShellHook{salt: salt}(manager, IFewFactory(FEW_FACTORY), IV4Quoter(V4_QUOTER), allowedInnerPools);
+        hook = new FewV4ShellHook{salt: salt}(
+            manager,
+            IFewFactory(FEW_FACTORY),
+            IV4Quoter(V4_QUOTER),
+            allowedInnerPools,
+            HOOK_OWNER,
+            IPositionManager(V4_POSITION_MANAGER)
+        );
         assertEq(address(hook), mined);
 
         outerKey = PoolKey({
@@ -173,6 +202,89 @@ contract FewV4ShellHookForkTest is Test {
 
     function test_realExactOutput_usdtToUsdc_quoteEqualsExecution() public requireFork {
         _assertExactOutput(false);
+    }
+
+    /// @notice Proof that the owner can seed outer-pool liquidity exactly the way the Uniswap
+    ///         interface does it (canonical PositionManager + Permit2), and that nobody else can.
+    function test_realPositionManagerLiquidityIsOwnerOnly() public requireFork {
+        assertEq(hook.owner(), HOOK_OWNER);
+        assertEq(address(hook.positionManager()), V4_POSITION_MANAGER);
+        assertEq(manager.getLiquidity(outerPoolId), 0);
+
+        _fundForLiquidity(STRANGER);
+        _fundForLiquidity(HOOK_OWNER);
+
+        uint256 strangerTokenId = IPositionManager(V4_POSITION_MANAGER).nextTokenId();
+        vm.prank(STRANGER);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CustomRevert.WrappedError.selector,
+                address(hook),
+                IHooks.beforeAddLiquidity.selector,
+                abi.encodeWithSelector(IAggregatorHook.LiquidityNotAllowed.selector),
+                abi.encodePacked(Hooks.HookCallFailed.selector)
+            )
+        );
+        IPositionManager(V4_POSITION_MANAGER).modifyLiquidities(_mintPlan(STRANGER), block.timestamp);
+
+        uint256 ownerTokenId = IPositionManager(V4_POSITION_MANAGER).nextTokenId();
+        assertEq(ownerTokenId, strangerTokenId, "reverted mint must not consume a tokenId");
+
+        _Snapshot memory beforeState = _snapshot();
+        uint256 usdcInventoryBefore = IERC20(USDC).balanceOf(address(manager));
+        uint256 usdtInventoryBefore = IERC20(USDT).balanceOf(address(manager));
+        vm.prank(HOOK_OWNER);
+        IPositionManager(V4_POSITION_MANAGER).modifyLiquidities(_mintPlan(HOOK_OWNER), block.timestamp);
+
+        assertGt(manager.getLiquidity(outerPoolId), 0, "owner liquidity is live");
+        assertGt(IERC20(USDC).balanceOf(address(manager)), usdcInventoryBefore);
+        assertGt(IERC20(USDT).balanceOf(address(manager)), usdtInventoryBefore);
+        assertEq(IERC20(USDC).balanceOf(address(hook)), 0);
+        assertEq(IERC20(USDT).balanceOf(address(hook)), 0);
+        assertEq(_snapshot().innerPrice, beforeState.innerPrice, "inner pool untouched by outer LP");
+
+        // The owner's outer liquidity is inert: swaps still execute against the inner fw pool.
+        _assertExactInput(true);
+        _assertExactOutput(false);
+
+        // The owner can always pull the seeded inventory back out.
+        vm.startPrank(HOOK_OWNER);
+        Plan memory plan =
+            Planner.init().add(Actions.BURN_POSITION, abi.encode(ownerTokenId, uint128(0), uint128(0), bytes("")));
+        IPositionManager(V4_POSITION_MANAGER)
+            .modifyLiquidities(plan.finalizeModifyLiquidityWithTake(outerKey, HOOK_OWNER), block.timestamp);
+        vm.stopPrank();
+        assertEq(manager.getLiquidity(outerPoolId), 0);
+    }
+
+    function _fundForLiquidity(address account) internal {
+        deal(USDC, account, 10_000e6);
+        deal(USDT, account, 10_000e6);
+
+        vm.startPrank(account);
+        IERC20(USDC).forceApprove(PERMIT2, type(uint256).max);
+        IERC20(USDT).forceApprove(PERMIT2, type(uint256).max);
+        IAllowanceTransfer(PERMIT2).approve(USDC, V4_POSITION_MANAGER, type(uint160).max, type(uint48).max);
+        IAllowanceTransfer(PERMIT2).approve(USDT, V4_POSITION_MANAGER, type(uint160).max, type(uint48).max);
+        vm.stopPrank();
+    }
+
+    function _mintPlan(address recipient) internal view returns (bytes memory) {
+        Plan memory plan = Planner.init()
+            .add(
+                Actions.MINT_POSITION,
+                abi.encode(
+                    outerKey,
+                    TickMath.minUsableTick(TICK_SPACING),
+                    TickMath.maxUsableTick(TICK_SPACING),
+                    uint256(1e8),
+                    uint128(10_000e6),
+                    uint128(10_000e6),
+                    recipient,
+                    bytes("")
+                )
+            );
+        return plan.finalizeModifyLiquidityWithSettlePair(outerKey);
     }
 
     function _assertExactInput(bool zeroForOne) internal {
@@ -260,7 +372,7 @@ contract FewV4ShellHookForkTest is Test {
     function _assertPostSwap(_Snapshot memory beforeState) internal view {
         _Snapshot memory afterState = _snapshot();
         assertEq(afterState.outerPrice, beforeState.outerPrice, "outer price unchanged");
-        assertEq(afterState.outerLiquidity, 0, "outer liquidity zero");
+        assertEq(afterState.outerLiquidity, beforeState.outerLiquidity, "outer liquidity is inert");
         assertTrue(afterState.innerPrice != beforeState.innerPrice, "real inner price moved");
         assertEq(afterState.managerUsdc, beforeState.managerUsdc, "manager USDC inventory restored");
         assertEq(afterState.managerUsdt, beforeState.managerUsdt, "manager USDT inventory restored");

@@ -24,12 +24,12 @@ A/B outer pool（零 LP）
 |---|---|
 | 流动性来源 | constructor allowlist 中唯一、精确的 inner PoolId |
 | inner key | canonical FewToken、hookless、static fee、已初始化且当前有 active liquidity |
-| outer pool | 相同 fee / tick spacing、零 LP、禁止 add liquidity 和 donate |
+| outer pool | 相同 fee / tick spacing、禁止 donate；只有 owner 能加流动性，且该流动性永不参与成交 |
 | 路由输入 | 不接受 caller 提供的 target、PoolKey 或非空 hookData |
 | 成交 | exact-in 和 exact-out 都必须完整成交，少 1 wei 即整笔回滚 |
 | price limit | V1 只接受 v4 canonical extreme；反序 token 采用严格 reciprocal rounding |
 | wrap / unwrap | 返回值和真实余额变化同时检查，approval 每次归零 |
-| 管理权限 | 无 owner、proxy、pause、route setter、fee setter、sweep |
+| 管理权限 | 无 proxy、pause、route setter、fee setter、sweep；owner immutable 且不可转移，唯一权限是给 outer pool 加流动性 |
 | 额外收费 | 无；用户只支付 inner v4 池现有 LP/protocol fee |
 | native ETH | V1 不支持；WETH 作为普通 ERC-20 可以支持 |
 
@@ -40,9 +40,11 @@ Hook 权限 mask 是 `0x2888`：
 - `beforeSwap`
 - `beforeSwapReturnDelta`
 
-outer pool 永久禁止 add liquidity，因此 active liquidity 始终为 0；donate 会由 v4 core 自身因无流动性拒绝，不需要额外启用 `beforeDonate` 权限。
+`beforeAddLiquidity` 只放行 owner：`sender` 在 v4 里是调用 PoolManager 的 router，所以判定分两种情况——`sender == owner`（owner 自己实现 unlock 的合约），或 `sender == positionManager` 且 `ownerOf(uint256(salt)) == owner`（Uniswap 前端路径，PositionManager 用 tokenId 作为 position salt，并在调用 hook 之前就 mint 好 ERC-721）。
 
-`beforeSwapReturnDelta` 必须为 `true` 才能让零流动性的 outer pool 完全由 inner pool 结算。因此，这个设计不满足“四个 return-delta flag 全为 false”的免人工检查条件，不能把它描述为绕过 Uniswap 审核。
+owner 的 outer 流动性是惰性库存：`beforeSwapReturnDelta` 吃掉全部 amount 后 `Pool.swap` 收到 0 并直接返回零 delta，因此 outer 池的头寸永远不参与成交、也拿不到手续费；它的唯一作用是把 origin token 物理余额留在 PoolManager 里，供 wrap 前的原子 `take` 使用。移除流动性不过 hook 校验（`beforeRemoveLiquidity` 保持 false），但 v4 只允许头寸持有者动它。donate 未启用 `beforeDonate`，在 outer 池无流动性时由 v4 core 自身拒绝。
+
+`beforeSwapReturnDelta` 必须为 `true` 才能让 outer pool 完全由 inner pool 结算。因此，这个设计不满足“四个 return-delta flag 全为 false”的免人工检查条件，不能把它描述为绕过 Uniswap 审核。
 
 ## 报价与发现边界
 
@@ -61,7 +63,8 @@ Hook 实现通用 `IAggregatorHook` ABI：
 - wrapper 地址排序同向和反向；
 - exact-in / exact-out × 双向；
 - Hook quote、direct inner quote 和实际成交逐 wei 一致；
-- outer liquidity 为 0，outer slot0 不移动，inner slot0 确实移动；
+- outer liquidity 不因成交变化，outer slot0 不移动，inner slot0 确实移动；
+- 非 PositionManager 的任意 router 加流动性、以及 PositionManager 上非 owner 持有的头寸，都以 `LiquidityNotAllowed` 回滚；owner 头寸可加、可全额取回，且加完后成交依旧走 inner 池；
 - Hook 四种 ERC-20 余额和四种 transient delta 回到 0；
 - 现有 origin/FewToken wrapper 池的 slot0 和 liquidity 不变化；
 - PoolManager origin token 物理余额在 router 结算后恢复；
@@ -72,7 +75,8 @@ Ethereum mainnet 固定块 `25,833,244` 还验证了真实：
 - inner `fwUSDC/fwUSDT` PoolId `0x6199c1a871328a693bbc9cd80a7e4874a4a7e2ebc862b51fa04bb6b587dbac47`；
 - wrapper pools `fwUSDC/USDC` 和 `USDT/fwUSDT`；
 - USDC/USDT 双向 exact-in / exact-out 四组 quote 与实际成交一致；
-- 两个 wrapper pool 的 slot0 和 liquidity 均未变化。
+- 两个 wrapper pool 的 slot0 和 liquidity 均未变化；
+- 真实 PositionManager `0xbD216513d74C8cf14cf4747E6AaA6420FF64ee9e` + Permit2 的 MINT_POSITION：owner 成功、非 owner 以 `LiquidityNotAllowed` 回滚、BURN_POSITION 可全额取回。fork 测试支持 `FORK_BLOCK=0` 跟随 RPC head，便于对本地 anvil 主网 fork 复跑。
 
 以上只证明固定块上的合约执行和会计，不代表当前流动性、部署安全或聚合器收录。
 
