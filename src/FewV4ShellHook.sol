@@ -2,6 +2,7 @@
 pragma solidity 0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
@@ -21,6 +22,7 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {ModifyLiquidityParams, SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 
 import {DeltaResolver} from "v4-periphery/src/base/DeltaResolver.sol";
+import {IPositionManager} from "v4-periphery/src/interfaces/IPositionManager.sol";
 import {IV4Quoter} from "v4-periphery/src/interfaces/IV4Quoter.sol";
 import {BaseHook} from "v4-periphery/src/utils/BaseHook.sol";
 
@@ -31,11 +33,15 @@ import {IFewWrappedToken} from "./interfaces/external/IFewWrappedToken.sol";
 /// @title FewV4ShellHook
 /// @notice Exposes an origin-token A/B v4 pool while executing every swap against one approved,
 ///         hookless fwA/fwB v4 pool: origin A -> fwA -> inner v4 swap -> fwB -> origin B.
-/// @dev The outer pool deliberately has no native liquidity. A before-swap return delta replaces
-///      the outer swap with the nested inner swap and leaves every Hook-owned PoolManager delta at zero.
+/// @dev The outer pool is never swapped against: a before-swap return delta replaces the outer swap
+///      with the nested inner swap and leaves every Hook-owned PoolManager delta at zero. Outer-pool
+///      liquidity is therefore inert (it earns no fee and is never traded) and exists only so the
+///      immutable owner can seed the physical origin-token inventory the flash conversion leg needs.
 ///
 ///      Safety model:
-///      - no owner, upgrade, pause, fee, sweep, or post-deploy route setter;
+///      - no upgrade, pause, fee, sweep, or post-deploy route setter, and no owner privilege other
+///        than adding outer-pool liquidity; removing that liquidity stays permissionless in v4 terms
+///        (only the position holder can ever move it);
 ///      - only constructor-allowlisted inner PoolIds may be registered;
 ///      - every inner key is canonical, static-fee, and hookless;
 ///      - exact-input and exact-output requests must fill completely or the whole transaction reverts;
@@ -89,6 +95,7 @@ contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregator
     error InsufficientConversionBalance(address token, uint256 available, uint256 required);
     error TokenBalanceMismatch(address token, uint256 expectedBalance, uint256 actualBalance);
     error SettlementAmountMismatch(address token, uint256 paid, uint256 expected);
+    error PositionManagerPoolManagerMismatch();
 
     event InnerPoolAllowed(PoolId indexed innerPoolId);
     event ShellPoolRegistered(
@@ -107,6 +114,15 @@ contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregator
     IFewFactory public immutable fewFactory;
     IV4Quoter public immutable quoter;
 
+    /// @notice The only address allowed to add liquidity to an outer shell pool. Immutable and not transferable.
+    /// @dev The owner has no other privilege: it cannot pause, re-route, set fees, or touch Hook or user funds.
+    address public immutable owner;
+
+    /// @notice Canonical v4 PositionManager, the router the owner is expected to add liquidity through.
+    /// @dev PoolManager reports the calling router as `sender` in beforeAddLiquidity, so owner-only
+    ///      gating is resolved against the position's ERC-721 holder when that router is the PositionManager.
+    IPositionManager public immutable positionManager;
+
     /// @notice Constructor-fixed inner liquidity sources. There is no function that can mutate this mapping later.
     mapping(PoolId innerPoolId => bool allowed) public allowedInnerPools;
     mapping(PoolId outerPoolId => RegisteredRoute route) internal _registeredRoutes;
@@ -117,17 +133,26 @@ contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregator
         IPoolManager _poolManager,
         IFewFactory _fewFactory,
         IV4Quoter _quoter,
-        PoolId[] memory _allowedInnerPoolIds
+        PoolId[] memory _allowedInnerPoolIds,
+        address _owner,
+        IPositionManager _positionManager
     ) BaseHook(_poolManager) {
-        if (address(_poolManager) == address(0) || address(_fewFactory) == address(0) || address(_quoter) == address(0))
-        {
+        if (
+            address(_poolManager) == address(0) || address(_fewFactory) == address(0) || address(_quoter) == address(0)
+                || _owner == address(0) || address(_positionManager) == address(0)
+        ) {
             revert ZeroAddress();
         }
         if (address(_quoter.poolManager()) != address(_poolManager)) revert QuoterPoolManagerMismatch();
+        if (address(_positionManager.poolManager()) != address(_poolManager)) {
+            revert PositionManagerPoolManagerMismatch();
+        }
         if (_allowedInnerPoolIds.length == 0) revert EmptyInnerPoolAllowlist();
 
         fewFactory = _fewFactory;
         quoter = _quoter;
+        owner = _owner;
+        positionManager = _positionManager;
 
         for (uint256 i; i < _allowedInnerPoolIds.length; ++i) {
             PoolId innerPoolId = _allowedInnerPoolIds[i];
@@ -207,13 +232,25 @@ contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregator
         return IHooks.beforeInitialize.selector;
     }
 
-    function _beforeAddLiquidity(address, PoolKey calldata, ModifyLiquidityParams calldata, bytes calldata)
-        internal
-        pure
-        override
-        returns (bytes4)
-    {
-        revert LiquidityNotAllowed();
+    /// @dev Only the owner may add liquidity. `sender` is the router that called PoolManager, so the
+    ///      owner is recognized either directly (owner-operated unlock caller) or, on the canonical
+    ///      PositionManager path used by the Uniswap interface, through the position's ERC-721 holder.
+    ///      PositionManager always uses the tokenId as the position salt and mints the receipt before
+    ///      calling this hook, and only the holder or an approved operator can increase that position.
+    ///      A third party can still mint a position to the owner, which is a gift the owner controls.
+    function _beforeAddLiquidity(
+        address sender,
+        PoolKey calldata,
+        ModifyLiquidityParams calldata params,
+        bytes calldata
+    ) internal view override returns (bytes4) {
+        if (sender != owner) {
+            if (sender != address(positionManager)) revert LiquidityNotAllowed();
+            if (IERC721(address(positionManager)).ownerOf(uint256(params.salt)) != owner) {
+                revert LiquidityNotAllowed();
+            }
+        }
+        return IHooks.beforeAddLiquidity.selector;
     }
 
     function _beforeSwap(address sender, PoolKey calldata key, SwapParams calldata params, bytes calldata hookData)

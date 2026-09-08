@@ -10,6 +10,7 @@ import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {TransientStateLibrary} from "@uniswap/v4-core/src/libraries/TransientStateLibrary.sol";
+import {PoolModifyLiquidityTest} from "@uniswap/v4-core/src/test/PoolModifyLiquidityTest.sol";
 import {PoolSwapTest} from "@uniswap/v4-core/src/test/PoolSwapTest.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
@@ -17,11 +18,13 @@ import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {ModifyLiquidityParams, SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 
+import {IPositionManager} from "v4-periphery/src/interfaces/IPositionManager.sol";
 import {IV4Quoter} from "v4-periphery/src/interfaces/IV4Quoter.sol";
 import {V4Quoter} from "v4-periphery/src/lens/V4Quoter.sol";
 import {HookMiner} from "v4-periphery/src/utils/HookMiner.sol";
 
 import {FewV4ShellHook} from "../../src/FewV4ShellHook.sol";
+import {IAggregatorHook} from "../../src/interfaces/IAggregatorHook.sol";
 import {IFewFactory} from "../../src/interfaces/external/IFewFactory.sol";
 
 contract ShellTestToken {
@@ -117,6 +120,22 @@ contract ShellTestToken {
     }
 }
 
+/// @dev Stands in for the canonical v4 PositionManager: it is the only router the Hook trusts, it
+///      exposes `poolManager()` and ERC-721 `ownerOf()`, and it uses the tokenId as the position salt.
+contract ShellTestPositionManager is PoolModifyLiquidityTest {
+    mapping(uint256 tokenId => address holder) public ownerOf;
+
+    constructor(IPoolManager _manager) PoolModifyLiquidityTest(_manager) {}
+
+    function poolManager() external view returns (IPoolManager) {
+        return manager;
+    }
+
+    function mintTo(address holder, uint256 tokenId) external {
+        ownerOf[tokenId] = holder;
+    }
+}
+
 contract ShellTestFactory is IFewFactory {
     mapping(address origin => address wrapper) public wrappers;
 
@@ -141,12 +160,15 @@ abstract contract FewV4ShellHookIntegrationBase is Deployers {
     int256 internal constant TEST_LIQUIDITY = 1e24;
     uint256 internal constant EXACT_INPUT = 1e18;
     uint256 internal constant EXACT_OUTPUT = 8e17;
+    uint256 internal constant OWNER_TOKEN_ID = 7;
+    uint256 internal constant STRANGER_TOKEN_ID = 8;
 
     ShellTestToken internal token0;
     ShellTestToken internal token1;
     ShellTestToken internal few0;
     ShellTestToken internal few1;
     ShellTestFactory internal factory;
+    ShellTestPositionManager internal shellPositionManager;
     V4Quoter internal shellQuoter;
     FewV4ShellHook internal hook;
 
@@ -197,16 +219,30 @@ abstract contract FewV4ShellHookIntegrationBase is Deployers {
         factory.setWrappedToken(address(token0), address(few0));
         factory.setWrappedToken(address(token1), address(few1));
         shellQuoter = new V4Quoter(manager);
+        shellPositionManager = new ShellTestPositionManager(manager);
+        token0.approve(address(shellPositionManager), type(uint256).max);
+        token1.approve(address(shellPositionManager), type(uint256).max);
 
         PoolId[] memory allowedInnerPools = new PoolId[](1);
         allowedInnerPools[0] = innerPoolId;
         uint160 flags = _hookFlags();
-        bytes memory constructorArgs =
-            abi.encode(manager, IFewFactory(address(factory)), IV4Quoter(address(shellQuoter)), allowedInnerPools);
+        bytes memory constructorArgs = abi.encode(
+            manager,
+            IFewFactory(address(factory)),
+            IV4Quoter(address(shellQuoter)),
+            allowedInnerPools,
+            address(this),
+            IPositionManager(address(shellPositionManager))
+        );
         (address mined, bytes32 salt) =
             HookMiner.find(address(this), flags, type(FewV4ShellHook).creationCode, constructorArgs);
         hook = new FewV4ShellHook{salt: salt}(
-            manager, IFewFactory(address(factory)), IV4Quoter(address(shellQuoter)), allowedInnerPools
+            manager,
+            IFewFactory(address(factory)),
+            IV4Quoter(address(shellQuoter)),
+            allowedInnerPools,
+            address(this),
+            IPositionManager(address(shellPositionManager))
         );
         assertEq(address(hook), mined, "mined hook address");
         assertEq(uint160(address(hook)) & Hooks.ALL_HOOK_MASK, flags, "hook permission mask");
@@ -251,8 +287,13 @@ abstract contract FewV4ShellHookIntegrationBase is Deployers {
         _assertExactInput(true);
     }
 
-    function test_outerLiquidityDonationAndNonemptyHookDataAreRejected() public {
-        vm.expectRevert();
+    function test_untrustedRouterLiquidityDonationAndNonemptyHookDataAreRejected() public {
+        // An arbitrary router is not the trusted PositionManager, so it can never be the owner.
+        vm.expectRevert(
+            _wrappedHookError(
+                IHooks.beforeAddLiquidity.selector, abi.encodeWithSelector(IAggregatorHook.LiquidityNotAllowed.selector)
+            )
+        );
         modifyLiquidityRouter.modifyLiquidity(
             outerKey, ModifyLiquidityParams({tickLower: -120, tickUpper: 120, liquidityDelta: 1e18, salt: 0}), bytes("")
         );
@@ -262,6 +303,54 @@ abstract contract FewV4ShellHookIntegrationBase is Deployers {
 
         vm.expectRevert();
         swap(outerKey, true, -int256(EXACT_INPUT), hex"01");
+    }
+
+    function test_ownerAddsOuterLiquidityThroughPositionManagerAndStrangerCannot() public {
+        assertEq(hook.owner(), address(this));
+        assertEq(address(hook.positionManager()), address(shellPositionManager));
+
+        // A stranger's position on the trusted PositionManager is rejected by the ERC-721 holder check.
+        shellPositionManager.mintTo(address(0xBAD), STRANGER_TOKEN_ID);
+        vm.expectRevert(
+            _wrappedHookError(
+                IHooks.beforeAddLiquidity.selector, abi.encodeWithSelector(IAggregatorHook.LiquidityNotAllowed.selector)
+            )
+        );
+        shellPositionManager.modifyLiquidity(
+            outerKey,
+            ModifyLiquidityParams({
+                tickLower: -120, tickUpper: 120, liquidityDelta: 1e18, salt: bytes32(STRANGER_TOKEN_ID)
+            }),
+            bytes("")
+        );
+
+        // The owner's position is accepted, and the deposit lands in the singleton as flash inventory.
+        shellPositionManager.mintTo(address(this), OWNER_TOKEN_ID);
+        uint256 inventory0Before = token0.balanceOf(address(manager));
+        uint256 inventory1Before = token1.balanceOf(address(manager));
+        shellPositionManager.modifyLiquidity(
+            outerKey,
+            ModifyLiquidityParams({
+                tickLower: -120, tickUpper: 120, liquidityDelta: 1e18, salt: bytes32(OWNER_TOKEN_ID)
+            }),
+            bytes("")
+        );
+        assertGt(token0.balanceOf(address(manager)), inventory0Before);
+        assertGt(token1.balanceOf(address(manager)), inventory1Before);
+        assertGt(manager.getLiquidity(outerPoolId), 0);
+
+        // Outer liquidity is inert: swaps still route through the inner pool and leave it untouched.
+        _assertExactInput(true);
+
+        // Removal is permissionless in hook terms; only the position holder can actually move it.
+        shellPositionManager.modifyLiquidity(
+            outerKey,
+            ModifyLiquidityParams({
+                tickLower: -120, tickUpper: 120, liquidityDelta: -1e18, salt: bytes32(OWNER_TOKEN_ID)
+            }),
+            bytes("")
+        );
+        assertEq(manager.getLiquidity(outerPoolId), 0);
     }
 
     function test_nonExtremeOuterPriceLimitIsRejectedBeforeInnerStateChanges() public {
@@ -327,14 +416,25 @@ abstract contract FewV4ShellHookIntegrationBase is Deployers {
         PoolId[] memory duplicateAllowlist = new PoolId[](2);
         duplicateAllowlist[0] = innerPoolId;
         duplicateAllowlist[1] = innerPoolId;
-        bytes memory constructorArgs =
-            abi.encode(manager, IFewFactory(address(factory)), IV4Quoter(address(shellQuoter)), duplicateAllowlist);
+        bytes memory constructorArgs = abi.encode(
+            manager,
+            IFewFactory(address(factory)),
+            IV4Quoter(address(shellQuoter)),
+            duplicateAllowlist,
+            address(this),
+            IPositionManager(address(shellPositionManager))
+        );
         (, bytes32 salt) =
             HookMiner.find(address(this), _hookFlags(), type(FewV4ShellHook).creationCode, constructorArgs);
 
         vm.expectRevert(abi.encodeWithSelector(FewV4ShellHook.DuplicateAllowedInnerPool.selector, innerPoolId));
         new FewV4ShellHook{salt: salt}(
-            manager, IFewFactory(address(factory)), IV4Quoter(address(shellQuoter)), duplicateAllowlist
+            manager,
+            IFewFactory(address(factory)),
+            IV4Quoter(address(shellQuoter)),
+            duplicateAllowlist,
+            address(this),
+            IPositionManager(address(shellPositionManager))
         );
     }
 
@@ -343,14 +443,52 @@ abstract contract FewV4ShellHookIntegrationBase is Deployers {
         V4Quoter wrongQuoter = new V4Quoter(otherManager);
         PoolId[] memory allowedInnerPools = new PoolId[](1);
         allowedInnerPools[0] = innerPoolId;
-        bytes memory constructorArgs =
-            abi.encode(manager, IFewFactory(address(factory)), IV4Quoter(address(wrongQuoter)), allowedInnerPools);
+        bytes memory constructorArgs = abi.encode(
+            manager,
+            IFewFactory(address(factory)),
+            IV4Quoter(address(wrongQuoter)),
+            allowedInnerPools,
+            address(this),
+            IPositionManager(address(shellPositionManager))
+        );
         (, bytes32 salt) =
             HookMiner.find(address(this), _hookFlags(), type(FewV4ShellHook).creationCode, constructorArgs);
 
         vm.expectRevert(FewV4ShellHook.QuoterPoolManagerMismatch.selector);
         new FewV4ShellHook{salt: salt}(
-            manager, IFewFactory(address(factory)), IV4Quoter(address(wrongQuoter)), allowedInnerPools
+            manager,
+            IFewFactory(address(factory)),
+            IV4Quoter(address(wrongQuoter)),
+            allowedInnerPools,
+            address(this),
+            IPositionManager(address(shellPositionManager))
+        );
+    }
+
+    function test_constructorRejectsPositionManagerForDifferentPoolManager() public {
+        PoolManager otherManager = new PoolManager(address(this));
+        ShellTestPositionManager wrongPositionManager = new ShellTestPositionManager(otherManager);
+        PoolId[] memory allowedInnerPools = new PoolId[](1);
+        allowedInnerPools[0] = innerPoolId;
+        bytes memory constructorArgs = abi.encode(
+            manager,
+            IFewFactory(address(factory)),
+            IV4Quoter(address(shellQuoter)),
+            allowedInnerPools,
+            address(this),
+            IPositionManager(address(wrongPositionManager))
+        );
+        (, bytes32 salt) =
+            HookMiner.find(address(this), _hookFlags(), type(FewV4ShellHook).creationCode, constructorArgs);
+
+        vm.expectRevert(FewV4ShellHook.PositionManagerPoolManagerMismatch.selector);
+        new FewV4ShellHook{salt: salt}(
+            manager,
+            IFewFactory(address(factory)),
+            IV4Quoter(address(shellQuoter)),
+            allowedInnerPools,
+            address(this),
+            IPositionManager(address(wrongPositionManager))
         );
     }
 
@@ -519,7 +657,7 @@ abstract contract FewV4ShellHookIntegrationBase is Deployers {
     function _assertPostSwap(_Snapshot memory beforeState) internal view {
         _Snapshot memory afterState = _snapshot();
         assertEq(afterState.outerPrice, beforeState.outerPrice, "outer price must not move");
-        assertEq(afterState.outerLiquidity, 0, "outer liquidity must remain zero");
+        assertEq(afterState.outerLiquidity, beforeState.outerLiquidity, "outer liquidity is inert");
         assertTrue(afterState.innerPrice != beforeState.innerPrice, "inner price must move");
         assertEq(afterState.managerToken0, beforeState.managerToken0, "manager token0 inventory restored");
         assertEq(afterState.managerToken1, beforeState.managerToken1, "manager token1 inventory restored");
@@ -567,10 +705,14 @@ abstract contract FewV4ShellHookIntegrationBase is Deployers {
     }
 
     function _wrappedBeforeInitializeError(bytes memory reason) internal view returns (bytes memory) {
+        return _wrappedHookError(IHooks.beforeInitialize.selector, reason);
+    }
+
+    function _wrappedHookError(bytes4 hookSelector, bytes memory reason) internal view returns (bytes memory) {
         return abi.encodeWithSelector(
             CustomRevert.WrappedError.selector,
             address(hook),
-            IHooks.beforeInitialize.selector,
+            hookSelector,
             reason,
             abi.encodePacked(Hooks.HookCallFailed.selector)
         );

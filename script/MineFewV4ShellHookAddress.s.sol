@@ -11,6 +11,7 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
+import {IPositionManager} from "v4-periphery/src/interfaces/IPositionManager.sol";
 import {IV4Quoter} from "v4-periphery/src/interfaces/IV4Quoter.sol";
 import {HookMiner} from "v4-periphery/src/utils/HookMiner.sol";
 
@@ -21,10 +22,10 @@ import {IFewWrappedToken} from "../src/interfaces/external/IFewWrappedToken.sol"
 /// @notice Read-only preflight and CREATE2 address mining for one FewToken v4 shell route.
 ///
 /// Required:
-///   TOKEN_A, TOKEN_B
+///   TOKEN_A, TOKEN_B, HOOK_OWNER
 ///
 /// Optional Ethereum defaults:
-///   V4_POOL_MANAGER, V4_QUOTER, FEW_FACTORY, POOL_FEE=500, TICK_SPACING=10
+///   V4_POOL_MANAGER, V4_QUOTER, V4_POSITION_MANAGER, FEW_FACTORY, POOL_FEE=500, TICK_SPACING=10
 contract MineFewV4ShellHookAddress is Script {
     using PoolIdLibrary for PoolKey;
     using StateLibrary for IPoolManager;
@@ -32,11 +33,14 @@ contract MineFewV4ShellHookAddress is Script {
     address internal constant CREATE2_DEPLOYER = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
     address internal constant V4_POOL_MANAGER_DEFAULT = 0x000000000004444c5dc75cB358380D2e3dE08A90;
     address internal constant V4_QUOTER_DEFAULT = 0x52F0E24D1c21C8A0cB1e5a5dD6198556BD9E1203;
+    address internal constant V4_POSITION_MANAGER_DEFAULT = 0xbD216513d74C8cf14cf4747E6AaA6420FF64ee9e;
     address internal constant FEW_FACTORY_DEFAULT = 0x7D86394139bf1122E82FDF45Bb4e3b038A4464DD;
 
     function run() external view {
         address poolManagerAddress = vm.envOr("V4_POOL_MANAGER", V4_POOL_MANAGER_DEFAULT);
         address quoterAddress = vm.envOr("V4_QUOTER", V4_QUOTER_DEFAULT);
+        address positionManagerAddress = vm.envOr("V4_POSITION_MANAGER", V4_POSITION_MANAGER_DEFAULT);
+        address hookOwner = vm.envAddress("HOOK_OWNER");
         address factoryAddress = vm.envOr("FEW_FACTORY", FEW_FACTORY_DEFAULT);
         address tokenA = vm.envAddress("TOKEN_A");
         address tokenB = vm.envAddress("TOKEN_B");
@@ -47,6 +51,11 @@ contract MineFewV4ShellHookAddress is Script {
         IPoolManager poolManager = IPoolManager(poolManagerAddress);
         IFewFactory factory = IFewFactory(factoryAddress);
         require(address(IV4Quoter(quoterAddress).poolManager()) == poolManagerAddress, "quoter/manager mismatch");
+        require(
+            address(IPositionManager(positionManagerAddress).poolManager()) == poolManagerAddress,
+            "position manager/manager mismatch"
+        );
+        require(hookOwner != address(0), "hook owner unset");
 
         address few0 = factory.getWrappedToken(token0);
         address few1 = factory.getWrappedToken(token1);
@@ -62,7 +71,14 @@ contract MineFewV4ShellHookAddress is Script {
 
         PoolId[] memory allowlist = new PoolId[](1);
         allowlist[0] = innerPoolId;
-        bytes memory constructorArgs = abi.encode(poolManager, factory, IV4Quoter(quoterAddress), allowlist);
+        bytes memory constructorArgs = abi.encode(
+            poolManager,
+            factory,
+            IV4Quoter(quoterAddress),
+            allowlist,
+            hookOwner,
+            IPositionManager(positionManagerAddress)
+        );
         uint160 flags = _flags();
         (address expectedHook, bytes32 salt) =
             HookMiner.find(CREATE2_DEPLOYER, flags, type(FewV4ShellHook).creationCode, constructorArgs);
@@ -72,6 +88,8 @@ contract MineFewV4ShellHookAddress is Script {
         console2.log("token1:       ", token1);
         console2.log("few0:         ", few0);
         console2.log("few1:         ", few1);
+        console2.log("owner:        ", hookOwner);
+        console2.log("posm:         ", positionManagerAddress);
         console2.log("fee:          ", fee);
         console2.log("tick spacing: ", tickSpacing);
         console2.log("active L:     ", poolManager.getLiquidity(innerPoolId));
