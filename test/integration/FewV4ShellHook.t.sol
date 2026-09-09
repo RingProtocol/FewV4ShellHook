@@ -763,7 +763,6 @@ abstract contract FewV4ShellHookIntegrationBase is Deployers {
         assertFalse(hook.poolEnabled(outerPoolId));
     }
 
-
     function _assertExactInput(bool zeroForOne) internal {
         _Snapshot memory beforeState = _snapshot();
         uint256 directQuote = _directQuote(zeroForOne, -int256(EXACT_INPUT));
