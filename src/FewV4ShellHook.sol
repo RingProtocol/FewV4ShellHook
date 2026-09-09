@@ -24,6 +24,7 @@ import {ModifyLiquidityParams, SwapParams} from "@uniswap/v4-core/src/types/Pool
 import {DeltaResolver} from "v4-periphery/src/base/DeltaResolver.sol";
 import {IPositionManager} from "v4-periphery/src/interfaces/IPositionManager.sol";
 import {IV4Quoter} from "v4-periphery/src/interfaces/IV4Quoter.sol";
+import {IWETH9} from "v4-periphery/src/interfaces/external/IWETH9.sol";
 import {BaseHook} from "v4-periphery/src/utils/BaseHook.sol";
 
 import {IAggregatorHook} from "./interfaces/IAggregatorHook.sol";
@@ -73,7 +74,6 @@ contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregator
     error EmptyInnerPoolAllowlist();
     error DuplicateAllowedInnerPool(PoolId poolId);
     error InvalidOuterCurrencies();
-    error NativeCurrencyNotSupported();
     error DynamicFeeNotSupported();
     error CanonicalWrapperMissing(address origin);
     error InvalidWrapper(address origin, address wrapper);
@@ -95,7 +95,6 @@ contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregator
     error UnwrapReturnMismatch(uint256 returnedAmount, uint256 expectedAmount);
     error InsufficientConversionBalance(address token, uint256 available, uint256 required);
     error TokenBalanceMismatch(address token, uint256 expectedBalance, uint256 actualBalance);
-    error SettlementAmountMismatch(address token, uint256 paid, uint256 expected);
     error PositionManagerPoolManagerMismatch();
     error NotOwner();
     error PoolDisabled(PoolId poolId);
@@ -125,6 +124,7 @@ contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregator
 
     IFewFactory public immutable fewFactory;
     IV4Quoter public immutable quoter;
+    IWETH9 public immutable weth;
 
     /// @notice The address allowed to add liquidity, toggle per-pool swap gating, and manage the inner-pool allowlist.
     /// @dev The owner has no other privilege: it cannot pause, re-route, set fees, or touch Hook or user funds.
@@ -147,13 +147,14 @@ contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregator
         IPoolManager _poolManager,
         IFewFactory _fewFactory,
         IV4Quoter _quoter,
+        IWETH9 _weth,
         PoolId[] memory _allowedInnerPoolIds,
         address _owner,
         IPositionManager _positionManager
     ) BaseHook(_poolManager) {
         if (
             address(_poolManager) == address(0) || address(_fewFactory) == address(0) || address(_quoter) == address(0)
-                || _owner == address(0) || address(_positionManager) == address(0)
+                || address(_weth) == address(0) || _owner == address(0) || address(_positionManager) == address(0)
         ) {
             revert ZeroAddress();
         }
@@ -165,6 +166,7 @@ contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregator
 
         fewFactory = _fewFactory;
         quoter = _quoter;
+        weth = _weth;
         owner = _owner;
         positionManager = _positionManager;
 
@@ -382,23 +384,25 @@ contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregator
         view
         returns (RegisteredRoute memory route)
     {
-        if (token0 == address(0) || token1 == address(0)) revert NativeCurrencyNotSupported();
         if (token0 >= token1) revert InvalidOuterCurrencies();
         if (fee.isDynamicFee()) revert DynamicFeeNotSupported();
         fee.validate();
 
-        address few0 = fewFactory.getWrappedToken(token0);
-        address few1 = fewFactory.getWrappedToken(token1);
-        if (few0 == address(0)) revert CanonicalWrapperMissing(token0);
-        if (few1 == address(0)) revert CanonicalWrapperMissing(token1);
-        if (few0 == few1) revert InvalidWrapper(token1, few1);
-        if (few0 == token0 || few0 == token1 || few0.code.length == 0) revert InvalidWrapper(token0, few0);
-        if (few1 == token0 || few1 == token1 || few1.code.length == 0) revert InvalidWrapper(token1, few1);
+        address origin0 = token0 == address(0) ? address(weth) : token0;
+        address origin1 = token1 == address(0) ? address(weth) : token1;
+
+        address few0 = fewFactory.getWrappedToken(origin0);
+        address few1 = fewFactory.getWrappedToken(origin1);
+        if (few0 == address(0)) revert CanonicalWrapperMissing(origin0);
+        if (few1 == address(0)) revert CanonicalWrapperMissing(origin1);
+        if (few0 == few1) revert InvalidWrapper(origin1, few1);
+        if (few0 == origin0 || few0 == origin1 || few0.code.length == 0) revert InvalidWrapper(origin0, few0);
+        if (few1 == origin0 || few1 == origin1 || few1.code.length == 0) revert InvalidWrapper(origin1, few1);
 
         address underlying0 = IFewWrappedToken(few0).token();
         address underlying1 = IFewWrappedToken(few1).token();
-        if (underlying0 != token0) revert WrapperUnderlyingMismatch(few0, token0, underlying0);
-        if (underlying1 != token1) revert WrapperUnderlyingMismatch(few1, token1, underlying1);
+        if (underlying0 != origin0) revert WrapperUnderlyingMismatch(few0, origin0, underlying0);
+        if (underlying1 != origin1) revert WrapperUnderlyingMismatch(few1, origin1, underlying1);
 
         bool orderAligned = few0 < few1;
         PoolKey memory innerKey = PoolKey({
@@ -515,10 +519,18 @@ contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregator
         uint256 inputBefore = input.balanceOfSelf();
         uint256 fewBefore = IERC20(fewToken).balanceOf(address(this));
 
-        IERC20(Currency.unwrap(input)).forceApprove(fewToken, amount);
-        uint256 returnedAmount = IFewWrappedToken(fewToken).wrap(amount);
-        IERC20(Currency.unwrap(input)).forceApprove(fewToken, 0);
-        if (returnedAmount != amount) revert WrapReturnMismatch(returnedAmount, amount);
+        if (Currency.unwrap(input) == address(0)) {
+            weth.deposit{value: amount}();
+            IERC20(address(weth)).forceApprove(fewToken, amount);
+            uint256 returnedAmount = IFewWrappedToken(fewToken).wrap(amount);
+            IERC20(address(weth)).forceApprove(fewToken, 0);
+            if (returnedAmount != amount) revert WrapReturnMismatch(returnedAmount, amount);
+        } else {
+            IERC20(Currency.unwrap(input)).forceApprove(fewToken, amount);
+            uint256 returnedAmount = IFewWrappedToken(fewToken).wrap(amount);
+            IERC20(Currency.unwrap(input)).forceApprove(fewToken, 0);
+            if (returnedAmount != amount) revert WrapReturnMismatch(returnedAmount, amount);
+        }
 
         if (inputBefore < amount) {
             revert InsufficientConversionBalance(Currency.unwrap(input), inputBefore, amount);
@@ -533,6 +545,10 @@ contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregator
         uint256 returnedAmount = IFewWrappedToken(fewToken).unwrap(amount);
         if (returnedAmount != amount) revert UnwrapReturnMismatch(returnedAmount, amount);
 
+        if (Currency.unwrap(output) == address(0)) {
+            weth.withdraw(amount);
+        }
+
         if (fewBefore < amount) revert InsufficientConversionBalance(fewToken, fewBefore, amount);
         _requireBalance(Currency.wrap(fewToken), fewBefore - amount);
         _requireBalance(output, outputBefore + amount);
@@ -540,9 +556,12 @@ contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregator
 
     function _settleExact(Currency currency, uint256 amount) internal {
         poolManager.sync(currency);
-        currency.transfer(address(poolManager), amount);
-        uint256 paid = poolManager.settle();
-        if (paid != amount) revert SettlementAmountMismatch(Currency.unwrap(currency), paid, amount);
+        if (Currency.unwrap(currency) == address(0)) {
+            poolManager.settle{value: amount}();
+        } else {
+            currency.transfer(address(poolManager), amount);
+            poolManager.settle();
+        }
     }
 
     function _requireBalance(Currency currency, uint256 expected) internal view {
@@ -551,7 +570,8 @@ contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregator
     }
 
     function _requireSettlementInventory(address token, uint256 amount) internal view {
-        uint256 available = IERC20(token).balanceOf(address(poolManager));
+        uint256 available =
+            token == address(0) ? address(poolManager).balance : IERC20(token).balanceOf(address(poolManager));
         if (available < amount) revert InsufficientSettlementInventory(token, available, amount);
     }
 
@@ -599,6 +619,8 @@ contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregator
         // event separately reports its LP + v4 protocol fee; the shell adds no additional fee.
         emit HookSwap(outerPoolId, sender, amount0, amount1, 0);
     }
+
+    receive() external payable {}
 
     function _pay(Currency currency, address, uint256 amount) internal override {
         currency.transfer(address(poolManager), amount);
