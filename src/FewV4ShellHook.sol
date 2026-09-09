@@ -40,8 +40,8 @@ import {IFewWrappedToken} from "./interfaces/external/IFewWrappedToken.sol";
 ///
 ///      Safety model:
 ///      - no upgrade, pause, fee, sweep, or post-deploy route setter, and no owner privilege other
-///        than adding outer-pool liquidity; removing that liquidity stays permissionless in v4 terms
-///        (only the position holder can ever move it);
+///        than adding outer-pool liquidity and toggling per-pool swap gating; removing that liquidity
+///        stays permissionless in v4 terms (only the position holder can ever move it);
 ///      - only constructor-allowlisted inner PoolIds may be registered;
 ///      - every inner key is canonical, static-fee, and hookless;
 ///      - exact-input and exact-output requests must fill completely or the whole transaction reverts;
@@ -96,6 +96,10 @@ contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregator
     error TokenBalanceMismatch(address token, uint256 expectedBalance, uint256 actualBalance);
     error SettlementAmountMismatch(address token, uint256 paid, uint256 expected);
     error PositionManagerPoolManagerMismatch();
+    error NotOwner();
+    error PoolDisabled(PoolId poolId);
+
+    event PoolEnabledSet(PoolId indexed poolId, bool enabled);
 
     event InnerPoolAllowed(PoolId indexed innerPoolId);
     event ShellPoolRegistered(
@@ -114,7 +118,7 @@ contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregator
     IFewFactory public immutable fewFactory;
     IV4Quoter public immutable quoter;
 
-    /// @notice The only address allowed to add liquidity to an outer shell pool. Immutable and not transferable.
+    /// @notice The only address allowed to add liquidity to an outer shell pool and toggle per-pool swap gating.
     /// @dev The owner has no other privilege: it cannot pause, re-route, set fees, or touch Hook or user funds.
     address public immutable owner;
 
@@ -128,6 +132,7 @@ contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregator
     mapping(PoolId outerPoolId => RegisteredRoute route) internal _registeredRoutes;
     mapping(PoolId innerPoolId => bool registered) public innerPoolRegistered;
     mapping(PoolId innerPoolId => PoolId outerPoolId) public outerPoolForInnerPool;
+    mapping(PoolId outerPoolId => bool enabled) public poolEnabled;
 
     constructor(
         IPoolManager _poolManager,
@@ -181,6 +186,14 @@ contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregator
         });
     }
 
+    /// @notice Enables or disables swaps for a registered outer pool. Only callable by the owner.
+    function setPoolEnabled(PoolId poolId, bool enabled) external {
+        if (msg.sender != owner) revert NotOwner();
+        if (!_registeredRoutes[poolId].registered) revert PoolDoesNotExist();
+        poolEnabled[poolId] = enabled;
+        emit PoolEnabledSet(poolId, enabled);
+    }
+
     /// @notice Returns the immutable route registered for an outer pool.
     function routeForPool(PoolId outerPoolId) external view returns (RegisteredRoute memory) {
         RegisteredRoute memory route = _registeredRoutes[outerPoolId];
@@ -226,6 +239,7 @@ contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregator
         _registeredRoutes[outerPoolId] = route;
         innerPoolRegistered[route.innerPoolId] = true;
         outerPoolForInnerPool[route.innerPoolId] = outerPoolId;
+        poolEnabled[outerPoolId] = true;
 
         emit AggregatorPoolRegistered(outerPoolId);
         emit ShellPoolRegistered(outerPoolId, route.innerPoolId, route.few0, route.few1, route.orderAligned);
@@ -261,6 +275,7 @@ contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregator
     {
         PoolId outerPoolId = key.toId();
         RegisteredRoute storage route = _registeredRoute(outerPoolId);
+        if (!poolEnabled[outerPoolId]) revert PoolDisabled(outerPoolId);
         if (hookData.length != 0) revert UnexpectedHookData();
         _validateAmount(params.amountSpecified);
 
