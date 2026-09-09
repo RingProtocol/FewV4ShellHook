@@ -568,6 +568,58 @@ abstract contract FewV4ShellHookIntegrationBase is Deployers {
         assertGt(hook.availableSettlementInventory(outerPoolId, false), EXACT_INPUT);
     }
 
+    function test_ownerIsSetInConstructorAndPoolIsEnabledByDefault() public {
+        assertEq(hook.owner(), address(this));
+        assertTrue(hook.poolEnabled(outerPoolId));
+    }
+
+    function test_ownerCanDisableAndReenablePool() public {
+        assertTrue(hook.poolEnabled(outerPoolId));
+
+        vm.expectEmit(true, false, false, true);
+        emit FewV4ShellHook.PoolEnabledSet(outerPoolId, false);
+        hook.setPoolEnabled(outerPoolId, false);
+        assertFalse(hook.poolEnabled(outerPoolId));
+
+        vm.expectEmit(true, false, false, true);
+        emit FewV4ShellHook.PoolEnabledSet(outerPoolId, true);
+        hook.setPoolEnabled(outerPoolId, true);
+        assertTrue(hook.poolEnabled(outerPoolId));
+
+        _assertExactInput(true);
+    }
+
+    function test_disabledPoolRejectsSwap() public {
+        hook.setPoolEnabled(outerPoolId, false);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CustomRevert.WrappedError.selector,
+                address(hook),
+                IHooks.beforeSwap.selector,
+                abi.encodeWithSelector(FewV4ShellHook.PoolDisabled.selector, outerPoolId),
+                abi.encodePacked(Hooks.HookCallFailed.selector)
+            )
+        );
+        swap(outerKey, true, -int256(EXACT_INPUT), bytes(""));
+
+        hook.setPoolEnabled(outerPoolId, true);
+        _assertExactInput(true);
+    }
+
+    function test_nonOwnerCannotSetPoolEnabled() public {
+        address stranger = address(0xBAD);
+        vm.prank(stranger);
+        vm.expectRevert(FewV4ShellHook.NotOwner.selector);
+        hook.setPoolEnabled(outerPoolId, false);
+    }
+
+    function test_setPoolEnabledRejectsUnregisteredPool() public {
+        PoolId fakePoolId = PoolId.wrap(bytes32(uint256(0xDEAD)));
+        vm.expectRevert(IAggregatorHook.PoolDoesNotExist.selector);
+        hook.setPoolEnabled(fakePoolId, false);
+    }
+
     function _assertExactInput(bool zeroForOne) internal {
         _Snapshot memory beforeState = _snapshot();
         uint256 directQuote = _directQuote(zeroForOne, -int256(EXACT_INPUT));
