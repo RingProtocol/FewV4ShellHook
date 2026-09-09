@@ -20,6 +20,7 @@ import {ModifyLiquidityParams, SwapParams} from "@uniswap/v4-core/src/types/Pool
 
 import {IPositionManager} from "v4-periphery/src/interfaces/IPositionManager.sol";
 import {IV4Quoter} from "v4-periphery/src/interfaces/IV4Quoter.sol";
+import {IWETH9} from "v4-periphery/src/interfaces/external/IWETH9.sol";
 import {V4Quoter} from "v4-periphery/src/lens/V4Quoter.sol";
 import {HookMiner} from "v4-periphery/src/utils/HookMiner.sol";
 
@@ -148,6 +149,60 @@ contract ShellTestFactory is IFewFactory {
     }
 }
 
+/// @dev Minimal WETH9 mock for native ETH wrap/unwrap tests.
+contract MockWETH9 is IWETH9 {
+    string public constant name = "Wrapped Ether";
+    string public constant symbol = "WETH";
+    uint8 public constant decimals = 18;
+
+    uint256 public totalSupply;
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function deposit() external payable {
+        balanceOf[msg.sender] += msg.value;
+        totalSupply += msg.value;
+    }
+
+    receive() external payable {
+        balanceOf[msg.sender] += msg.value;
+        totalSupply += msg.value;
+    }
+
+    function withdraw(uint256 amount) external {
+        require(balanceOf[msg.sender] >= amount);
+        balanceOf[msg.sender] -= amount;
+        totalSupply -= amount;
+        payable(msg.sender).transfer(amount);
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        emit Approval(msg.sender, spender, amount);
+        return true;
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        require(balanceOf[msg.sender] >= amount);
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        emit Transfer(msg.sender, to, amount);
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        require(balanceOf[from] >= amount);
+        if (allowance[from][msg.sender] != type(uint256).max) {
+            require(allowance[from][msg.sender] >= amount);
+            allowance[from][msg.sender] -= amount;
+        }
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        emit Transfer(from, to, amount);
+        return true;
+    }
+}
+
 abstract contract FewV4ShellHookIntegrationBase is Deployers {
     using PoolIdLibrary for PoolKey;
     using StateLibrary for IPoolManager;
@@ -170,6 +225,7 @@ abstract contract FewV4ShellHookIntegrationBase is Deployers {
     ShellTestFactory internal factory;
     ShellTestPositionManager internal shellPositionManager;
     V4Quoter internal shellQuoter;
+    MockWETH9 internal weth;
     FewV4ShellHook internal hook;
 
     PoolKey internal innerKey;
@@ -220,6 +276,7 @@ abstract contract FewV4ShellHookIntegrationBase is Deployers {
         factory.setWrappedToken(address(token1), address(few1));
         shellQuoter = new V4Quoter(manager);
         shellPositionManager = new ShellTestPositionManager(manager);
+        weth = new MockWETH9();
         token0.approve(address(shellPositionManager), type(uint256).max);
         token1.approve(address(shellPositionManager), type(uint256).max);
 
@@ -230,6 +287,7 @@ abstract contract FewV4ShellHookIntegrationBase is Deployers {
             manager,
             IFewFactory(address(factory)),
             IV4Quoter(address(shellQuoter)),
+            IWETH9(address(weth)),
             allowedInnerPools,
             address(this),
             IPositionManager(address(shellPositionManager))
@@ -240,6 +298,7 @@ abstract contract FewV4ShellHookIntegrationBase is Deployers {
             manager,
             IFewFactory(address(factory)),
             IV4Quoter(address(shellQuoter)),
+            IWETH9(address(weth)),
             allowedInnerPools,
             address(this),
             IPositionManager(address(shellPositionManager))
@@ -420,6 +479,7 @@ abstract contract FewV4ShellHookIntegrationBase is Deployers {
             manager,
             IFewFactory(address(factory)),
             IV4Quoter(address(shellQuoter)),
+            IWETH9(address(weth)),
             duplicateAllowlist,
             address(this),
             IPositionManager(address(shellPositionManager))
@@ -432,6 +492,7 @@ abstract contract FewV4ShellHookIntegrationBase is Deployers {
             manager,
             IFewFactory(address(factory)),
             IV4Quoter(address(shellQuoter)),
+            IWETH9(address(weth)),
             duplicateAllowlist,
             address(this),
             IPositionManager(address(shellPositionManager))
@@ -447,6 +508,7 @@ abstract contract FewV4ShellHookIntegrationBase is Deployers {
             manager,
             IFewFactory(address(factory)),
             IV4Quoter(address(wrongQuoter)),
+            IWETH9(address(weth)),
             allowedInnerPools,
             address(this),
             IPositionManager(address(shellPositionManager))
@@ -459,6 +521,7 @@ abstract contract FewV4ShellHookIntegrationBase is Deployers {
             manager,
             IFewFactory(address(factory)),
             IV4Quoter(address(wrongQuoter)),
+            IWETH9(address(weth)),
             allowedInnerPools,
             address(this),
             IPositionManager(address(shellPositionManager))
@@ -474,6 +537,7 @@ abstract contract FewV4ShellHookIntegrationBase is Deployers {
             manager,
             IFewFactory(address(factory)),
             IV4Quoter(address(shellQuoter)),
+            IWETH9(address(weth)),
             allowedInnerPools,
             address(this),
             IPositionManager(address(wrongPositionManager))
@@ -486,6 +550,7 @@ abstract contract FewV4ShellHookIntegrationBase is Deployers {
             manager,
             IFewFactory(address(factory)),
             IV4Quoter(address(shellQuoter)),
+            IWETH9(address(weth)),
             allowedInnerPools,
             address(this),
             IPositionManager(address(wrongPositionManager))
@@ -549,10 +614,7 @@ abstract contract FewV4ShellHookIntegrationBase is Deployers {
         _assertQuoteDidNotMutate(beforeState);
     }
 
-    function test_previewRejectsNativeDynamicAndNonAllowlistedInnerKeys() public {
-        vm.expectRevert(FewV4ShellHook.NativeCurrencyNotSupported.selector);
-        hook.previewRoute(address(0), address(token1), FEE, TICK_SPACING);
-
+    function test_previewRejectsDynamicAndNonAllowlistedInnerKeys() public {
         vm.expectRevert(FewV4ShellHook.DynamicFeeNotSupported.selector);
         hook.previewRoute(address(token0), address(token1), 0x800000, TICK_SPACING);
 

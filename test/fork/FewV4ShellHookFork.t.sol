@@ -22,6 +22,7 @@ import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol"
 
 import {IPositionManager} from "v4-periphery/src/interfaces/IPositionManager.sol";
 import {IV4Quoter} from "v4-periphery/src/interfaces/IV4Quoter.sol";
+import {IWETH9} from "v4-periphery/src/interfaces/external/IWETH9.sol";
 import {Actions} from "v4-periphery/src/libraries/Actions.sol";
 import {HookMiner} from "v4-periphery/src/utils/HookMiner.sol";
 import {Plan, Planner} from "v4-periphery/test/shared/Planner.sol";
@@ -139,10 +140,12 @@ contract FewV4ShellHookForkTest is Test {
             Hooks.BEFORE_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG
                 | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
         );
+        address wethAddress = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
         bytes memory constructorArgs = abi.encode(
             manager,
             IFewFactory(FEW_FACTORY),
             IV4Quoter(V4_QUOTER),
+            IWETH9(wethAddress),
             allowedInnerPools,
             HOOK_OWNER,
             IPositionManager(V4_POSITION_MANAGER)
@@ -153,6 +156,7 @@ contract FewV4ShellHookForkTest is Test {
             manager,
             IFewFactory(FEW_FACTORY),
             IV4Quoter(V4_QUOTER),
+            IWETH9(wethAddress),
             allowedInnerPools,
             HOOK_OWNER,
             IPositionManager(V4_POSITION_MANAGER)
