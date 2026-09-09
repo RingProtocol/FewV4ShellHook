@@ -620,6 +620,88 @@ abstract contract FewV4ShellHookIntegrationBase is Deployers {
         hook.setPoolEnabled(fakePoolId, false);
     }
 
+    function test_ownerCanAddAllowedInnerPool() public {
+        PoolId newPoolId = PoolId.wrap(bytes32(uint256(0xBEEF)));
+        assertFalse(hook.allowedInnerPools(newPoolId));
+
+        vm.expectEmit(false, false, false, true);
+        emit FewV4ShellHook.InnerPoolAllowed(newPoolId);
+        hook.addAllowedInnerPool(newPoolId);
+
+        assertTrue(hook.allowedInnerPools(newPoolId));
+    }
+
+    function test_nonOwnerCannotAddAllowedInnerPool() public {
+        address stranger = address(0xBAD);
+        PoolId newPoolId = PoolId.wrap(bytes32(uint256(0xBEEF)));
+        vm.prank(stranger);
+        vm.expectRevert(FewV4ShellHook.NotOwner.selector);
+        hook.addAllowedInnerPool(newPoolId);
+    }
+
+    function test_ownerCanTransferOwner() public {
+        address newOwner = address(0xA0E);
+        assertEq(hook.owner(), address(this));
+
+        vm.expectEmit(true, true, false, false);
+        emit FewV4ShellHook.OwnerTransferred(address(this), newOwner);
+        hook.transferOwner(newOwner);
+
+        assertEq(hook.owner(), newOwner);
+    }
+
+    function test_newOwnerCanManagePools() public {
+        address newOwner = address(0xA0E);
+        hook.transferOwner(newOwner);
+
+        PoolId newPoolId = PoolId.wrap(bytes32(uint256(0xBEEF)));
+        vm.prank(newOwner);
+        hook.addAllowedInnerPool(newPoolId);
+        assertTrue(hook.allowedInnerPools(newPoolId));
+    }
+
+    function test_oldOwnerCannotManageAfterTransfer() public {
+        address newOwner = address(0xA0E);
+        hook.transferOwner(newOwner);
+
+        PoolId newPoolId = PoolId.wrap(bytes32(uint256(0xBEEF)));
+        vm.expectRevert(FewV4ShellHook.NotOwner.selector);
+        hook.addAllowedInnerPool(newPoolId);
+
+        vm.expectRevert(FewV4ShellHook.NotOwner.selector);
+        hook.transferOwner(address(0xCAFE));
+    }
+
+    function test_transferOwnerRejectsZeroAddress() public {
+        vm.expectRevert(FewV4ShellHook.InvalidNewOwner.selector);
+        hook.transferOwner(address(0));
+    }
+
+    function test_nonOwnerCannotTransferOwner() public {
+        address stranger = address(0xBAD);
+        vm.prank(stranger);
+        vm.expectRevert(FewV4ShellHook.NotOwner.selector);
+        hook.transferOwner(stranger);
+    }
+
+    function test_oldOwnerCannotSetPoolEnabledAfterTransfer() public {
+        address newOwner = address(0xA0E);
+        hook.transferOwner(newOwner);
+
+        vm.expectRevert(FewV4ShellHook.NotOwner.selector);
+        hook.setPoolEnabled(outerPoolId, false);
+    }
+
+    function test_newOwnerCanSetPoolEnabled() public {
+        address newOwner = address(0xA0E);
+        hook.transferOwner(newOwner);
+
+        vm.prank(newOwner);
+        hook.setPoolEnabled(outerPoolId, false);
+        assertFalse(hook.poolEnabled(outerPoolId));
+    }
+
+
     function _assertExactInput(bool zeroForOne) internal {
         _Snapshot memory beforeState = _snapshot();
         uint256 directQuote = _directQuote(zeroForOne, -int256(EXACT_INPUT));

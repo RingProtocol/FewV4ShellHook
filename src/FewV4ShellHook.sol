@@ -36,13 +36,14 @@ import {IFewWrappedToken} from "./interfaces/external/IFewWrappedToken.sol";
 /// @dev The outer pool is never swapped against: a before-swap return delta replaces the outer swap
 ///      with the nested inner swap and leaves every Hook-owned PoolManager delta at zero. Outer-pool
 ///      liquidity is therefore inert (it earns no fee and is never traded) and exists only so the
-///      immutable owner can seed the physical origin-token inventory the flash conversion leg needs.
+///      owner can seed the physical origin-token inventory the flash conversion leg needs.
 ///
 ///      Safety model:
-///      - no upgrade, pause, fee, sweep, or post-deploy route setter, and no owner privilege other
-///        than adding outer-pool liquidity and toggling per-pool swap gating; removing that liquidity
-///        stays permissionless in v4 terms (only the position holder can ever move it);
-///      - only constructor-allowlisted inner PoolIds may be registered;
+///      - no upgrade, pause, fee, or sweep; the owner can add outer-pool liquidity, toggle per-pool
+///        swap gating, manage the inner-pool allowlist, and transfer ownership — nothing else;
+///        removing liquidity stays permissionless in v4 terms (only the position holder can ever move it);
+///      - only allowlisted inner PoolIds may be registered (allowlist is set at construction and can
+///        be extended or pruned by the owner afterwards);
 ///      - every inner key is canonical, static-fee, and hookless;
 ///      - exact-input and exact-output requests must fill completely or the whole transaction reverts;
 ///      - only the canonical v4 extreme price limits are accepted in V1;
@@ -98,8 +99,10 @@ contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregator
     error PositionManagerPoolManagerMismatch();
     error NotOwner();
     error PoolDisabled(PoolId poolId);
+    error InvalidNewOwner();
 
     event PoolEnabledSet(PoolId indexed poolId, bool enabled);
+    event OwnerTransferred(address indexed previousOwner, address indexed newOwner);
 
     event InnerPoolAllowed(PoolId indexed innerPoolId);
     event ShellPoolRegistered(
@@ -115,19 +118,25 @@ contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregator
         uint256 amountOut
     );
 
+    modifier onlyOwner() {
+        if (msg.sender != owner) revert NotOwner();
+        _;
+    }
+
     IFewFactory public immutable fewFactory;
     IV4Quoter public immutable quoter;
 
-    /// @notice The only address allowed to add liquidity to an outer shell pool and toggle per-pool swap gating.
+    /// @notice The address allowed to add liquidity, toggle per-pool swap gating, and manage the inner-pool allowlist.
     /// @dev The owner has no other privilege: it cannot pause, re-route, set fees, or touch Hook or user funds.
-    address public immutable owner;
+    ///      Ownership is transferable via `transferOwner`.
+    address public owner;
 
     /// @notice Canonical v4 PositionManager, the router the owner is expected to add liquidity through.
     /// @dev PoolManager reports the calling router as `sender` in beforeAddLiquidity, so owner-only
     ///      gating is resolved against the position's ERC-721 holder when that router is the PositionManager.
     IPositionManager public immutable positionManager;
 
-    /// @notice Constructor-fixed inner liquidity sources. There is no function that can mutate this mapping later.
+    /// @notice Inner liquidity sources that may be registered as shell routes. Mutable by the owner.
     mapping(PoolId innerPoolId => bool allowed) public allowedInnerPools;
     mapping(PoolId outerPoolId => RegisteredRoute route) internal _registeredRoutes;
     mapping(PoolId innerPoolId => bool registered) public innerPoolRegistered;
@@ -187,11 +196,24 @@ contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregator
     }
 
     /// @notice Enables or disables swaps for a registered outer pool. Only callable by the owner.
-    function setPoolEnabled(PoolId poolId, bool enabled) external {
-        if (msg.sender != owner) revert NotOwner();
+    function setPoolEnabled(PoolId poolId, bool enabled) external onlyOwner {
         if (!_registeredRoutes[poolId].registered) revert PoolDoesNotExist();
         poolEnabled[poolId] = enabled;
         emit PoolEnabledSet(poolId, enabled);
+    }
+
+    /// @notice Transfers ownership to a new address. Only callable by the current owner.
+    function transferOwner(address newOwner) external onlyOwner {
+        if (newOwner == address(0)) revert InvalidNewOwner();
+        address previousOwner = owner;
+        owner = newOwner;
+        emit OwnerTransferred(previousOwner, newOwner);
+    }
+
+    /// @notice Adds an inner pool to the allowlist so it can be registered as a shell route. Only callable by the owner.
+    function addAllowedInnerPool(PoolId innerPoolId) external onlyOwner {
+        allowedInnerPools[innerPoolId] = true;
+        emit InnerPoolAllowed(innerPoolId);
     }
 
     /// @notice Returns the immutable route registered for an outer pool.
