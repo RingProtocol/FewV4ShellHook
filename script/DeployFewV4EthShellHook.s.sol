@@ -11,7 +11,6 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
-import {IPositionManager} from "v4-periphery/src/interfaces/IPositionManager.sol";
 import {IV4Quoter} from "v4-periphery/src/interfaces/IV4Quoter.sol";
 import {IWETH9} from "v4-periphery/src/interfaces/external/IWETH9.sol";
 import {HookMiner} from "v4-periphery/src/utils/HookMiner.sol";
@@ -28,7 +27,7 @@ import {IFewWrappedToken} from "../src/interfaces/external/IFewWrappedToken.sol"
 ///   TOKEN (the non-ETH ERC20), HOOK_OWNER
 ///
 /// Optional:
-///   V4_POOL_MANAGER, V4_QUOTER, V4_POSITION_MANAGER, FEW_FACTORY, WETH, POOL_FEE=500, TICK_SPACING=10, SKIP_INIT_POOL=false
+///   V4_POOL_MANAGER, V4_QUOTER, FEW_FACTORY, WETH, POOL_FEE=500, TICK_SPACING=10, SKIP_INIT_POOL=false
 contract DeployFewV4EthShellHook is Script {
     using PoolIdLibrary for PoolKey;
     using StateLibrary for IPoolManager;
@@ -39,7 +38,6 @@ contract DeployFewV4EthShellHook is Script {
     function run() external {
         address poolManagerAddress = vm.envAddress("V4_POOL_MANAGER");
         address quoterAddress = vm.envAddress("V4_QUOTER");
-        address positionManagerAddress = vm.envAddress("V4_POSITION_MANAGER");
         address factoryAddress = vm.envAddress("FEW_FACTORY");
         address wethAddress = vm.envOr("WETH", WETH_SEPOLIA);
         address token = vm.envAddress("TOKEN");
@@ -57,10 +55,6 @@ contract DeployFewV4EthShellHook is Script {
         IPoolManager poolManager = IPoolManager(poolManagerAddress);
         IFewFactory factory = IFewFactory(factoryAddress);
         require(address(IV4Quoter(quoterAddress).poolManager()) == poolManagerAddress, "quoter/manager mismatch");
-        require(
-            address(IPositionManager(positionManagerAddress).poolManager()) == poolManagerAddress,
-            "position manager/manager mismatch"
-        );
         require(hookOwner != address(0), "hook owner unset");
 
         address fwEth = factory.getWrappedToken(wethAddress);
@@ -78,15 +72,8 @@ contract DeployFewV4EthShellHook is Script {
 
         PoolId[] memory allowlist = new PoolId[](1);
         allowlist[0] = innerPoolId;
-        bytes memory constructorArgs = abi.encode(
-            poolManager,
-            factory,
-            IV4Quoter(quoterAddress),
-            IWETH9(wethAddress),
-            allowlist,
-            hookOwner,
-            IPositionManager(positionManagerAddress)
-        );
+        bytes memory constructorArgs =
+            abi.encode(poolManager, factory, IV4Quoter(quoterAddress), IWETH9(wethAddress), allowlist, hookOwner);
         bytes memory initCode = abi.encodePacked(type(FewV4ShellHook).creationCode, constructorArgs);
         uint160 flags = _flags();
         (address expectedHook, bytes32 salt) =
@@ -107,7 +94,6 @@ contract DeployFewV4EthShellHook is Script {
         require(address(shell.weth()) == wethAddress, "deployed weth mismatch");
         require(shell.allowedInnerPools(innerPoolId), "inner pool not allowlisted");
         require(shell.owner() == hookOwner, "deployed owner mismatch");
-        require(address(shell.positionManager()) == positionManagerAddress, "deployed posm mismatch");
 
         PoolKey memory outerKey = _outerKey(token0, token1, fee, tickSpacing, IHooks(expectedHook));
         PoolId outerPoolId = outerKey.toId();
@@ -123,7 +109,6 @@ contract DeployFewV4EthShellHook is Script {
         console2.log("=== FewV4EthShellHook deployment verified ===");
         console2.log("Hook:          ", expectedHook);
         console2.log("owner:         ", hookOwner);
-        console2.log("posm:          ", positionManagerAddress);
         console2.log("weth:          ", wethAddress);
         console2.log("token0 (ETH):  ", token0);
         console2.log("token1:        ", token1);

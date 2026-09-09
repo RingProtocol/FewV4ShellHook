@@ -34,6 +34,18 @@ forge test --match-path 'test/fork/FewV4ShellHookFork.t.sol'
 
 The review repository is [RingProtocol/FewV4ShellHook](https://github.com/RingProtocol/FewV4ShellHook). Publishing this source does not imply an audit, deployment, official Uniswap routing support, or production approval.
 
+## Deploy hook
+forge script script/DeployFewV4EthShellHook.s.sol \
+  --rpc-url $SEPOLIA_RPC_URL \
+  --private-key $ETH_PRIVATE_KEY \
+  --broadcast
+
+## Test swap
+forge script script/SwapFewV4EthShell.s.sol --tc SwapFewV4EthShell \
+     --rpc-url $SEPOLIA_RPC_URL \
+     --private-key $ETH_PRIVATE_KEY \
+     --broadcast
+
 ## License
 
 The project is licensed under GPL-2.0-or-later. See [LICENSE](LICENSE).
