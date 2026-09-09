@@ -86,7 +86,6 @@ contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregator
     error InvalidMirroredPrice(uint256 sqrtPriceX96);
     error UnexpectedHookData();
     error AmountOutOfRange(int256 amountSpecified);
-    error UnsupportedOuterPriceLimit(uint160 supplied, uint160 expected);
     error InnerSwapDirectionMismatch();
     error InnerSwapPartialFill(uint256 actual, uint256 expected);
     error InsufficientSettlementInventory(address token, uint256 available, uint256 required);
@@ -303,10 +302,6 @@ contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregator
         if (hookData.length != 0) revert UnexpectedHookData();
         _validateAmount(params.amountSpecified);
 
-        uint160 expectedOuterLimit = params.zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1;
-        if (params.sqrtPriceLimitX96 != expectedOuterLimit) {
-            revert UnsupportedOuterPriceLimit(params.sqrtPriceLimitX96, expectedOuterLimit);
-        }
 
         bool innerZeroForOne = params.zeroForOne == route.orderAligned;
         if (params.amountSpecified < 0) {

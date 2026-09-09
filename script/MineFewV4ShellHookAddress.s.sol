@@ -13,6 +13,7 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
 import {IPositionManager} from "v4-periphery/src/interfaces/IPositionManager.sol";
 import {IV4Quoter} from "v4-periphery/src/interfaces/IV4Quoter.sol";
+import {IWETH9} from "v4-periphery/src/interfaces/external/IWETH9.sol";
 import {HookMiner} from "v4-periphery/src/utils/HookMiner.sol";
 
 import {FewV4ShellHook} from "../src/FewV4ShellHook.sol";
@@ -20,12 +21,13 @@ import {IFewFactory} from "../src/interfaces/external/IFewFactory.sol";
 import {IFewWrappedToken} from "../src/interfaces/external/IFewWrappedToken.sol";
 
 /// @notice Read-only preflight and CREATE2 address mining for one FewToken v4 shell route.
+///         Supports native ETH when TOKEN_A or TOKEN_B is address(0).
 ///
 /// Required:
 ///   TOKEN_A, TOKEN_B, HOOK_OWNER
 ///
 /// Optional Ethereum defaults:
-///   V4_POOL_MANAGER, V4_QUOTER, V4_POSITION_MANAGER, FEW_FACTORY, POOL_FEE=500, TICK_SPACING=10
+///   V4_POOL_MANAGER, V4_QUOTER, V4_POSITION_MANAGER, FEW_FACTORY, WETH, POOL_FEE=500, TICK_SPACING=10
 contract MineFewV4ShellHookAddress is Script {
     using PoolIdLibrary for PoolKey;
     using StateLibrary for IPoolManager;
@@ -35,6 +37,7 @@ contract MineFewV4ShellHookAddress is Script {
     address internal constant V4_QUOTER_DEFAULT = 0x52F0E24D1c21C8A0cB1e5a5dD6198556BD9E1203;
     address internal constant V4_POSITION_MANAGER_DEFAULT = 0xbD216513d74C8cf14cf4747E6AaA6420FF64ee9e;
     address internal constant FEW_FACTORY_DEFAULT = 0x7D86394139bf1122E82FDF45Bb4e3b038A4464DD;
+    address internal constant WETH_DEFAULT = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
 
     function run() external view {
         address poolManagerAddress = vm.envOr("V4_POOL_MANAGER", V4_POOL_MANAGER_DEFAULT);
@@ -42,6 +45,7 @@ contract MineFewV4ShellHookAddress is Script {
         address positionManagerAddress = vm.envOr("V4_POSITION_MANAGER", V4_POSITION_MANAGER_DEFAULT);
         address hookOwner = vm.envAddress("HOOK_OWNER");
         address factoryAddress = vm.envOr("FEW_FACTORY", FEW_FACTORY_DEFAULT);
+        address wethAddress = vm.envOr("WETH", WETH_DEFAULT);
         address tokenA = vm.envAddress("TOKEN_A");
         address tokenB = vm.envAddress("TOKEN_B");
         uint24 fee = uint24(vm.envOr("POOL_FEE", uint256(500)));
@@ -57,11 +61,13 @@ contract MineFewV4ShellHookAddress is Script {
         );
         require(hookOwner != address(0), "hook owner unset");
 
-        address few0 = factory.getWrappedToken(token0);
-        address few1 = factory.getWrappedToken(token1);
+        address origin0 = token0 == address(0) ? wethAddress : token0;
+        address origin1 = token1 == address(0) ? wethAddress : token1;
+        address few0 = factory.getWrappedToken(origin0);
+        address few1 = factory.getWrappedToken(origin1);
         require(few0 != address(0) && few1 != address(0) && few0 != few1, "canonical wrapper missing");
-        require(IFewWrappedToken(few0).token() == token0, "few0 underlying mismatch");
-        require(IFewWrappedToken(few1).token() == token1, "few1 underlying mismatch");
+        require(IFewWrappedToken(few0).token() == origin0, "few0 underlying mismatch");
+        require(IFewWrappedToken(few1).token() == origin1, "few1 underlying mismatch");
 
         PoolKey memory innerKey = _innerKey(few0, few1, fee, tickSpacing);
         PoolId innerPoolId = innerKey.toId();
@@ -75,6 +81,7 @@ contract MineFewV4ShellHookAddress is Script {
             poolManager,
             factory,
             IV4Quoter(quoterAddress),
+            IWETH9(wethAddress),
             allowlist,
             hookOwner,
             IPositionManager(positionManagerAddress)
@@ -84,6 +91,7 @@ contract MineFewV4ShellHookAddress is Script {
             HookMiner.find(CREATE2_DEPLOYER, flags, type(FewV4ShellHook).creationCode, constructorArgs);
 
         console2.log("=== FewV4ShellHook preflight ===");
+        console2.log("weth:         ", wethAddress);
         console2.log("token0:       ", token0);
         console2.log("token1:       ", token1);
         console2.log("few0:         ", few0);
@@ -118,7 +126,7 @@ contract MineFewV4ShellHookAddress is Script {
     }
 
     function _sort(address a, address b) internal pure returns (address first, address second) {
-        require(a != address(0) && b != address(0) && a != b, "invalid currencies");
+        require(a != b, "identical currencies");
         return a < b ? (a, b) : (b, a);
     }
 
