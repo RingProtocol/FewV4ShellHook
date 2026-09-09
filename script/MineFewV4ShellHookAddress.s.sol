@@ -11,10 +11,8 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
-import {IPositionManager} from "v4-periphery/src/interfaces/IPositionManager.sol";
 import {IV4Quoter} from "v4-periphery/src/interfaces/IV4Quoter.sol";
 import {IWETH9} from "v4-periphery/src/interfaces/external/IWETH9.sol";
-import {HookMiner} from "v4-periphery/src/utils/HookMiner.sol";
 
 import {FewV4ShellHook} from "../src/FewV4ShellHook.sol";
 import {IFewFactory} from "../src/interfaces/external/IFewFactory.sol";
@@ -27,7 +25,7 @@ import {IFewWrappedToken} from "../src/interfaces/external/IFewWrappedToken.sol"
 ///   TOKEN_A, TOKEN_B, HOOK_OWNER
 ///
 /// Optional Ethereum defaults:
-///   V4_POOL_MANAGER, V4_QUOTER, V4_POSITION_MANAGER, FEW_FACTORY, WETH, POOL_FEE=500, TICK_SPACING=10
+///   V4_POOL_MANAGER, V4_QUOTER, FEW_FACTORY, WETH, POOL_FEE=500, TICK_SPACING=10
 contract MineFewV4ShellHookAddress is Script {
     using PoolIdLibrary for PoolKey;
     using StateLibrary for IPoolManager;
@@ -35,14 +33,12 @@ contract MineFewV4ShellHookAddress is Script {
     address internal constant CREATE2_DEPLOYER = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
     address internal constant V4_POOL_MANAGER_DEFAULT = 0x000000000004444c5dc75cB358380D2e3dE08A90;
     address internal constant V4_QUOTER_DEFAULT = 0x52F0E24D1c21C8A0cB1e5a5dD6198556BD9E1203;
-    address internal constant V4_POSITION_MANAGER_DEFAULT = 0xbD216513d74C8cf14cf4747E6AaA6420FF64ee9e;
     address internal constant FEW_FACTORY_DEFAULT = 0x7D86394139bf1122E82FDF45Bb4e3b038A4464DD;
     address internal constant WETH_DEFAULT = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
 
     function run() external view {
         address poolManagerAddress = vm.envOr("V4_POOL_MANAGER", V4_POOL_MANAGER_DEFAULT);
         address quoterAddress = vm.envOr("V4_QUOTER", V4_QUOTER_DEFAULT);
-        address positionManagerAddress = vm.envOr("V4_POSITION_MANAGER", V4_POSITION_MANAGER_DEFAULT);
         address hookOwner = vm.envAddress("HOOK_OWNER");
         address factoryAddress = vm.envOr("FEW_FACTORY", FEW_FACTORY_DEFAULT);
         address wethAddress = vm.envOr("WETH", WETH_DEFAULT);
@@ -55,10 +51,6 @@ contract MineFewV4ShellHookAddress is Script {
         IPoolManager poolManager = IPoolManager(poolManagerAddress);
         IFewFactory factory = IFewFactory(factoryAddress);
         require(address(IV4Quoter(quoterAddress).poolManager()) == poolManagerAddress, "quoter/manager mismatch");
-        require(
-            address(IPositionManager(positionManagerAddress).poolManager()) == poolManagerAddress,
-            "position manager/manager mismatch"
-        );
         require(hookOwner != address(0), "hook owner unset");
 
         address origin0 = token0 == address(0) ? wethAddress : token0;
@@ -75,20 +67,10 @@ contract MineFewV4ShellHookAddress is Script {
         require(innerPrice != 0, "inner pool uninitialized");
         require(poolManager.getLiquidity(innerPoolId) != 0, "inner pool has no active liquidity");
 
-        PoolId[] memory allowlist = new PoolId[](1);
-        allowlist[0] = innerPoolId;
-        bytes memory constructorArgs = abi.encode(
-            poolManager,
-            factory,
-            IV4Quoter(quoterAddress),
-            IWETH9(wethAddress),
-            allowlist,
-            hookOwner,
-            IPositionManager(positionManagerAddress)
+        bytes memory constructorArgs = _constructorArgs(
+            poolManager, factory, IV4Quoter(quoterAddress), IWETH9(wethAddress), innerPoolId, hookOwner
         );
-        uint160 flags = _flags();
-        (address expectedHook, bytes32 salt) =
-            HookMiner.find(CREATE2_DEPLOYER, flags, type(FewV4ShellHook).creationCode, constructorArgs);
+        (address expectedHook, bytes32 salt) = _mineHookAddress(_initCodeHash(constructorArgs));
 
         console2.log("=== FewV4ShellHook preflight ===");
         console2.log("weth:         ", wethAddress);
@@ -97,17 +79,57 @@ contract MineFewV4ShellHookAddress is Script {
         console2.log("few0:         ", few0);
         console2.log("few1:         ", few1);
         console2.log("owner:        ", hookOwner);
-        console2.log("posm:         ", positionManagerAddress);
         console2.log("fee:          ", fee);
         console2.log("tick spacing: ", tickSpacing);
         console2.log("active L:     ", poolManager.getLiquidity(innerPoolId));
         console2.log("inner price:  ", innerPrice);
         console2.log("inner PoolId:");
         console2.logBytes32(PoolId.unwrap(innerPoolId));
-        console2.log("permission mask:", flags);
+        console2.log("permission mask:", _flags());
         console2.log("HOOK_SALT:");
         console2.logBytes32(salt);
         console2.log("EXPECTED_HOOK_ADDRESS:", expectedHook);
+    }
+
+    function _constructorArgs(
+        IPoolManager poolManager,
+        IFewFactory factory,
+        IV4Quoter quoter,
+        IWETH9 weth,
+        PoolId innerPoolId,
+        address hookOwner
+    ) internal pure returns (bytes memory) {
+        PoolId[] memory allowlist = new PoolId[](1);
+        allowlist[0] = innerPoolId;
+        return abi.encode(poolManager, factory, quoter, weth, allowlist, hookOwner);
+    }
+
+    function _initCodeHash(bytes memory constructorArgs) internal pure returns (bytes32) {
+        bytes memory creationCode = type(FewV4ShellHook).creationCode;
+        uint256 creationLen = creationCode.length;
+        uint256 argsLen = constructorArgs.length;
+        bytes memory initCode = new bytes(creationLen + argsLen);
+        assembly ("memory-safe") {
+            let creationPtr := add(creationCode, 0x20)
+            let argsPtr := add(constructorArgs, 0x20)
+            let initPtr := add(initCode, 0x20)
+            mcopy(initPtr, creationPtr, creationLen)
+            mcopy(add(initPtr, creationLen), argsPtr, argsLen)
+        }
+        return keccak256(initCode);
+    }
+
+    function _mineHookAddress(bytes32 initCodeHash) internal view returns (address expectedHook, bytes32 salt) {
+        uint160 flags = _flags() & uint160(Hooks.ALL_HOOK_MASK);
+        for (uint256 s; s < 160_444; ++s) {
+            expectedHook = address(
+                uint160(uint256(keccak256(abi.encodePacked(bytes1(0xFF), CREATE2_DEPLOYER, bytes32(s), initCodeHash))))
+            );
+            if ((uint160(expectedHook) & uint160(Hooks.ALL_HOOK_MASK)) == flags && expectedHook.code.length == 0) {
+                return (expectedHook, bytes32(s));
+            }
+        }
+        revert("could not find salt");
     }
 
     function _innerKey(address few0, address few1, uint24 fee, int24 tickSpacing)

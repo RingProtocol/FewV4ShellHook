@@ -20,7 +20,6 @@ import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 
 import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
 
-import {IPositionManager} from "v4-periphery/src/interfaces/IPositionManager.sol";
 import {IV4Quoter} from "v4-periphery/src/interfaces/IV4Quoter.sol";
 import {IWETH9} from "v4-periphery/src/interfaces/external/IWETH9.sol";
 import {Actions} from "v4-periphery/src/libraries/Actions.sol";
@@ -93,7 +92,6 @@ contract FewV4ShellHookForkTest is Test {
     address internal constant USDT = 0xdAC17F958D2ee523a2206206994597C13D831ec7;
     address internal constant FW_USDC = 0x0492560FA7Cfd6A85E50D8bE3F77318994F8f429;
     address internal constant FW_USDT = 0xef87f4608e601E8564800265AeE1c1FfaDF73283;
-    address internal constant V4_POSITION_MANAGER = 0xbD216513d74C8cf14cf4747E6AaA6420FF64ee9e;
     address internal constant PERMIT2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
     address internal constant USER = address(0xBEEF);
     address internal constant HOOK_OWNER = address(0xA11CE);
@@ -142,24 +140,12 @@ contract FewV4ShellHookForkTest is Test {
         );
         address wethAddress = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
         bytes memory constructorArgs = abi.encode(
-            manager,
-            IFewFactory(FEW_FACTORY),
-            IV4Quoter(V4_QUOTER),
-            IWETH9(wethAddress),
-            allowedInnerPools,
-            HOOK_OWNER,
-            IPositionManager(V4_POSITION_MANAGER)
+            manager, IFewFactory(FEW_FACTORY), IV4Quoter(V4_QUOTER), IWETH9(wethAddress), allowedInnerPools, HOOK_OWNER
         );
         (address mined, bytes32 salt) =
             HookMiner.find(address(this), flags, type(FewV4ShellHook).creationCode, constructorArgs);
         hook = new FewV4ShellHook{salt: salt}(
-            manager,
-            IFewFactory(FEW_FACTORY),
-            IV4Quoter(V4_QUOTER),
-            IWETH9(wethAddress),
-            allowedInnerPools,
-            HOOK_OWNER,
-            IPositionManager(V4_POSITION_MANAGER)
+            manager, IFewFactory(FEW_FACTORY), IV4Quoter(V4_QUOTER), IWETH9(wethAddress), allowedInnerPools, HOOK_OWNER
         );
         assertEq(address(hook), mined);
 
@@ -206,89 +192,6 @@ contract FewV4ShellHookForkTest is Test {
 
     function test_realExactOutput_usdtToUsdc_quoteEqualsExecution() public requireFork {
         _assertExactOutput(false);
-    }
-
-    /// @notice Proof that the owner can seed outer-pool liquidity exactly the way the Uniswap
-    ///         interface does it (canonical PositionManager + Permit2), and that nobody else can.
-    function test_realPositionManagerLiquidityIsOwnerOnly() public requireFork {
-        assertEq(hook.owner(), HOOK_OWNER);
-        assertEq(address(hook.positionManager()), V4_POSITION_MANAGER);
-        assertEq(manager.getLiquidity(outerPoolId), 0);
-
-        _fundForLiquidity(STRANGER);
-        _fundForLiquidity(HOOK_OWNER);
-
-        uint256 strangerTokenId = IPositionManager(V4_POSITION_MANAGER).nextTokenId();
-        vm.prank(STRANGER);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                CustomRevert.WrappedError.selector,
-                address(hook),
-                IHooks.beforeAddLiquidity.selector,
-                abi.encodeWithSelector(IAggregatorHook.LiquidityNotAllowed.selector),
-                abi.encodePacked(Hooks.HookCallFailed.selector)
-            )
-        );
-        IPositionManager(V4_POSITION_MANAGER).modifyLiquidities(_mintPlan(STRANGER), block.timestamp);
-
-        uint256 ownerTokenId = IPositionManager(V4_POSITION_MANAGER).nextTokenId();
-        assertEq(ownerTokenId, strangerTokenId, "reverted mint must not consume a tokenId");
-
-        _Snapshot memory beforeState = _snapshot();
-        uint256 usdcInventoryBefore = IERC20(USDC).balanceOf(address(manager));
-        uint256 usdtInventoryBefore = IERC20(USDT).balanceOf(address(manager));
-        vm.prank(HOOK_OWNER);
-        IPositionManager(V4_POSITION_MANAGER).modifyLiquidities(_mintPlan(HOOK_OWNER), block.timestamp);
-
-        assertGt(manager.getLiquidity(outerPoolId), 0, "owner liquidity is live");
-        assertGt(IERC20(USDC).balanceOf(address(manager)), usdcInventoryBefore);
-        assertGt(IERC20(USDT).balanceOf(address(manager)), usdtInventoryBefore);
-        assertEq(IERC20(USDC).balanceOf(address(hook)), 0);
-        assertEq(IERC20(USDT).balanceOf(address(hook)), 0);
-        assertEq(_snapshot().innerPrice, beforeState.innerPrice, "inner pool untouched by outer LP");
-
-        // The owner's outer liquidity is inert: swaps still execute against the inner fw pool.
-        _assertExactInput(true);
-        _assertExactOutput(false);
-
-        // The owner can always pull the seeded inventory back out.
-        vm.startPrank(HOOK_OWNER);
-        Plan memory plan =
-            Planner.init().add(Actions.BURN_POSITION, abi.encode(ownerTokenId, uint128(0), uint128(0), bytes("")));
-        IPositionManager(V4_POSITION_MANAGER)
-            .modifyLiquidities(plan.finalizeModifyLiquidityWithTake(outerKey, HOOK_OWNER), block.timestamp);
-        vm.stopPrank();
-        assertEq(manager.getLiquidity(outerPoolId), 0);
-    }
-
-    function _fundForLiquidity(address account) internal {
-        deal(USDC, account, 10_000e6);
-        deal(USDT, account, 10_000e6);
-
-        vm.startPrank(account);
-        IERC20(USDC).forceApprove(PERMIT2, type(uint256).max);
-        IERC20(USDT).forceApprove(PERMIT2, type(uint256).max);
-        IAllowanceTransfer(PERMIT2).approve(USDC, V4_POSITION_MANAGER, type(uint160).max, type(uint48).max);
-        IAllowanceTransfer(PERMIT2).approve(USDT, V4_POSITION_MANAGER, type(uint160).max, type(uint48).max);
-        vm.stopPrank();
-    }
-
-    function _mintPlan(address recipient) internal view returns (bytes memory) {
-        Plan memory plan = Planner.init()
-            .add(
-                Actions.MINT_POSITION,
-                abi.encode(
-                    outerKey,
-                    TickMath.minUsableTick(TICK_SPACING),
-                    TickMath.maxUsableTick(TICK_SPACING),
-                    uint256(1e8),
-                    uint128(10_000e6),
-                    uint128(10_000e6),
-                    recipient,
-                    bytes("")
-                )
-            );
-        return plan.finalizeModifyLiquidityWithSettlePair(outerKey);
     }
 
     function _assertExactInput(bool zeroForOne) internal {

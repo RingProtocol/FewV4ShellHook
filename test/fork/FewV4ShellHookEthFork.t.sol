@@ -19,7 +19,6 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {SwapParams, ModifyLiquidityParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 
 import {IV4Quoter} from "v4-periphery/src/interfaces/IV4Quoter.sol";
-import {IPositionManager} from "v4-periphery/src/interfaces/IPositionManager.sol";
 import {IWETH9} from "v4-periphery/src/interfaces/external/IWETH9.sol";
 import {HookMiner} from "v4-periphery/src/utils/HookMiner.sol";
 
@@ -86,7 +85,6 @@ contract FewV4ShellHookEthForkTest is Test {
     address internal constant FEW_FACTORY = 0x7D86394139bf1122E82FDF45Bb4e3b038A4464DD;
     address internal constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
     address internal constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
-    address internal constant V4_POSITION_MANAGER = 0xbD216513d74C8cf14cf4747E6AaA6420FF64ee9e;
 
     uint24 internal constant FEE = 500;
     int24 internal constant TICK_SPACING = 10;
@@ -144,25 +142,12 @@ contract FewV4ShellHookEthForkTest is Test {
             Hooks.BEFORE_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG
                 | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
         );
-        bytes memory constructorArgs = abi.encode(
-            manager,
-            IFewFactory(FEW_FACTORY),
-            IV4Quoter(V4_QUOTER),
-            IWETH9(WETH),
-            allowed,
-            HOOK_OWNER,
-            IPositionManager(V4_POSITION_MANAGER)
-        );
+        bytes memory constructorArgs =
+            abi.encode(manager, IFewFactory(FEW_FACTORY), IV4Quoter(V4_QUOTER), IWETH9(WETH), allowed, HOOK_OWNER);
         (address mined, bytes32 salt) =
             HookMiner.find(address(this), flags, type(FewV4ShellHook).creationCode, constructorArgs);
         hook = new FewV4ShellHook{salt: salt}(
-            manager,
-            IFewFactory(FEW_FACTORY),
-            IV4Quoter(V4_QUOTER),
-            IWETH9(WETH),
-            allowed,
-            HOOK_OWNER,
-            IPositionManager(V4_POSITION_MANAGER)
+            manager, IFewFactory(FEW_FACTORY), IV4Quoter(V4_QUOTER), IWETH9(WETH), allowed, HOOK_OWNER
         );
         assertEq(address(hook), mined);
 
