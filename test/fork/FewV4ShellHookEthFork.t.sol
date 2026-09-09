@@ -207,9 +207,7 @@ contract FewV4ShellHookEthForkTest is Test {
         BalanceDelta delta = swapRouter.swap{value: EXACT_INPUT}(
             outerKey,
             SwapParams({
-                zeroForOne: true,
-                amountSpecified: -int256(EXACT_INPUT),
-                sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
+                zeroForOne: true, amountSpecified: -int256(EXACT_INPUT), sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
             })
         );
 
@@ -248,9 +246,7 @@ contract FewV4ShellHookEthForkTest is Test {
         BalanceDelta delta = swapRouter.swap(
             outerKey,
             SwapParams({
-                zeroForOne: false,
-                amountSpecified: -int256(100e6),
-                sqrtPriceLimitX96: TickMath.MAX_SQRT_PRICE - 1
+                zeroForOne: false, amountSpecified: -int256(100e6), sqrtPriceLimitX96: TickMath.MAX_SQRT_PRICE - 1
             })
         );
 
