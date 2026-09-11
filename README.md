@@ -35,16 +35,23 @@ forge test --match-path 'test/fork/FewV4ShellHookFork.t.sol'
 The review repository is [RingProtocol/FewV4ShellHook](https://github.com/RingProtocol/FewV4ShellHook). Publishing this source does not imply an audit, deployment, official Uniswap routing support, or production approval.
 
 ## Deploy hook
-forge script script/DeployFewV4EthShellHook.s.sol \
-  --rpc-url $SEPOLIA_RPC_URL \
-  --private-key $ETH_PRIVATE_KEY \
-  --broadcast
 
-## Test swap
-forge script script/SwapFewV4EthShell.s.sol --tc SwapFewV4EthShell \
-     --rpc-url $SEPOLIA_RPC_URL \
-     --private-key $ETH_PRIVATE_KEY \
-     --broadcast
+The owner-aware deployment script is the supported deployment path. It deploys the hook through a helper contract and transfers ownership to `HOOK_OWNER` in the same transaction sequence. It does not initialize a pool.
+
+```sh
+source .env
+forge script script/DeployFewV4ShellHookWithOwner.s.sol:DeployFewV4ShellHookWithOwner \
+  --rpc-url "$MAINNET_RPC_URL" \
+  --private-key "$ETH_PRIVATE_KEY" \
+  --broadcast
+```
+
+Required environment variables:
+
+- `ETH_PRIVATE_KEY`
+- `HOOK_OWNER`
+
+The old `DeployFewV4ShellHook.s.sol` deployment path is deprecated and must not be used because the canonical CREATE2 deployer becomes the hook owner. Pool initialization and swap validation are separate operations; use the local deployment scripts and Foundry integration tests for those checks.
 
 ## License
 

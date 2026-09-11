@@ -2,338 +2,221 @@
 pragma solidity 0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
-import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {SafeCast} from "@uniswap/v4-core/src/libraries/SafeCast.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
-import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta, toBeforeSwapDelta} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
 import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {ModifyLiquidityParams, SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
+import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 
-import {DeltaResolver} from "v4-periphery/src/base/DeltaResolver.sol";
-import {IV4Quoter} from "v4-periphery/src/interfaces/IV4Quoter.sol";
-import {IWETH9} from "v4-periphery/src/interfaces/external/IWETH9.sol";
 import {BaseHook} from "v4-periphery/src/utils/BaseHook.sol";
+import {IWETH9} from "v4-periphery/src/interfaces/external/IWETH9.sol";
+import {IV4Quoter} from "v4-periphery/src/interfaces/IV4Quoter.sol";
 
-import {IAggregatorHook} from "./interfaces/IAggregatorHook.sol";
 import {IFewFactory} from "./interfaces/external/IFewFactory.sol";
 import {IFewWrappedToken} from "./interfaces/external/IFewWrappedToken.sol";
+import {IAggregatorHook} from "./interfaces/IAggregatorHook.sol";
+import {LpRouteLib} from "./libraries/LpRouteLib.sol";
+import {LpPriceLib} from "./libraries/LpPriceLib.sol";
+import {LpSettlement} from "./base/LpSettlement.sol";
+import {LpOwner} from "./base/LpOwner.sol";
 
 /// @title FewV4ShellHook
-/// @notice Exposes an origin-token A/B v4 pool while executing every swap against one approved,
-///         hookless fwA/fwB v4 pool: origin A -> fwA -> inner v4 swap -> fwB -> origin B.
-/// @dev The outer pool is never swapped against: a before-swap return delta replaces the outer swap
-///      with the nested inner swap and leaves every Hook-owned PoolManager delta at zero. Outer-pool
-///      liquidity is therefore inert (it earns no fee and is never traded) and exists only to seed the
-///      physical origin-token inventory the flash conversion leg needs.
+/// @notice A v4 hook that routes all swaps through the fwA/fwB FewToken lp pool (lp pool).
 ///
+/// @dev Core logic:
+///      The hook always routes to lp when available. The cur pool is never used as an execution venue.
+///      If lp is unavailable (no route, no liquidity, or insufficient inventory), the swap reverts.
+///
+///      Slippage protection relies on v4 native mechanisms:
+///      - sqrtPriceLimitX96 is mapped to the lp pool's price space before the lp swap.
+///      - The caller's router enforces deadline, amountOutMinimum, and amountInMaximum.
+///      - lp swaps must fill completely or the whole transaction reverts.
+///      hookData is ignored.
+//
 ///      Safety model:
-///      - no upgrade, pause, fee, or sweep; the owner toggles per-pool swap gating, manages the
-///        inner-pool allowlist, and transfers ownership — nothing else;
-///        adding and removing liquidity stays permissionless in v4 terms (only the position holder can move it);
-///      - only allowlisted inner PoolIds may be registered (allowlist is set at construction and can
-///        be extended or pruned by the owner afterwards);
-///      - every inner key is canonical, static-fee, and hookless;
+///      - a single transferable `owner` (set to the deployer at construction) can register explicit
+///        lp pool mappings; there is no upgrade, fee, pause, or sweep capability;
+///      - anyone may add liquidity to the cur pool;
+///      - routing always goes to lp; the cur pool is never used as a lp venue;
+///      - the lp pool key is taken from the owner-registered `lpPools` mapping (keyed by cur pool PoolId)
+///        when present, otherwise derived purely from the cur pool key and FewFactory state;
+///      - wrap/unwrap are strict 1:1 with return-value and balance checks;
 ///      - exact-input and exact-output requests must fill completely or the whole transaction reverts;
-///      - the PoolManager must already hold enough physical origin input for the atomic flash conversion.
-contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregatorHook {
+///      - the PoolManager must already hold enough physical origin input for the atomic flash conversion
+///        when the lp route is chosen.
+contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAggregatorHook {
     using CurrencyLibrary for Currency;
+    using FullMath for uint256;
+    using LpRouteLib for LpRouteLib.LpRoute;
     using LPFeeLibrary for uint24;
     using PoolIdLibrary for PoolKey;
     using SafeCast for int256;
     using SafeCast for uint256;
-    using SafeERC20 for IERC20;
     using StateLibrary for IPoolManager;
 
-    struct RegisteredRoute {
-        address token0;
-        address token1;
-        address few0;
-        address few1;
-        uint24 fee;
-        int24 tickSpacing;
-        PoolId innerPoolId;
-        bool orderAligned;
-        bool registered;
-    }
-
-    error ZeroAddress();
-    error EmptyInnerPoolAllowlist();
-    error DuplicateAllowedInnerPool(PoolId poolId);
-    error InvalidOuterCurrencies();
-    error DynamicFeeNotSupported();
-    error CanonicalWrapperMissing(address origin);
-    error InvalidWrapper(address origin, address wrapper);
     error WrapperUnderlyingMismatch(address wrapper, address expected, address actual);
-    error InnerPoolNotAllowed(PoolId poolId);
-    error InnerPoolNotInitialized(PoolId poolId);
-    error InnerPoolHasNoActiveLiquidity(PoolId poolId);
-    error InnerPoolAlreadyRegistered(PoolId innerPoolId, PoolId outerPoolId);
-    error OuterPriceMismatch(uint160 supplied, uint160 expected);
-    error InvalidMirroredPrice(uint256 sqrtPriceX96);
-    error UnexpectedHookData();
-    error AmountOutOfRange(int256 amountSpecified);
-    error InnerSwapDirectionMismatch();
-    error InnerSwapPartialFill(uint256 actual, uint256 expected);
-    error InsufficientSettlementInventory(address token, uint256 available, uint256 required);
-    error QuoterPoolManagerMismatch();
-    error WrapReturnMismatch(uint256 returnedAmount, uint256 expectedAmount);
-    error UnwrapReturnMismatch(uint256 returnedAmount, uint256 expectedAmount);
-    error InsufficientConversionBalance(address token, uint256 available, uint256 required);
-    error TokenBalanceMismatch(address token, uint256 expectedBalance, uint256 actualBalance);
-    error NotOwner();
-    error PoolDisabled(PoolId poolId);
-    error InvalidNewOwner();
+    error LpSwapDirectionMismatch();
+    error LpSwapPartialFill(uint256 actual, uint256 expected);
+    error LpRouteUnavailable();
+    error LpInsufficientInventory(address token, uint256 available, uint256 required);
+    error CurPoolNotInitialized(PoolId curPoolId);
 
-    event PoolEnabledSet(PoolId indexed poolId, bool enabled);
-    event OwnerTransferred(address indexed previousOwner, address indexed newOwner);
-
-    event InnerPoolAllowed(PoolId indexed innerPoolId);
-    event ShellPoolRegistered(
-        PoolId indexed outerPoolId, PoolId indexed innerPoolId, address indexed few0, address few1, bool orderAligned
-    );
-    event ShellSwap(
-        PoolId indexed outerPoolId,
-        PoolId indexed innerPoolId,
+    event LpSwap(
+        PoolId indexed curPoolId,
+        PoolId indexed lpPoolId,
         address indexed sender,
         bool zeroForOne,
+        bool usedLp,
         int256 amountSpecified,
         uint256 amountIn,
         uint256 amountOut
     );
-
-    modifier onlyOwner() {
-        if (msg.sender != owner) revert NotOwner();
-        _;
-    }
+    event LpPoolSet(PoolId indexed curPoolId, PoolKey lpPoolKey);
+    event LpPoolRemoved(PoolId indexed curPoolId);
 
     IFewFactory public immutable fewFactory;
-    IV4Quoter public immutable quoter;
     IWETH9 public immutable weth;
+    IV4Quoter public immutable v4Quoter;
 
-    /// @notice The address allowed to toggle per-pool swap gating and manage the inner-pool allowlist.
-    /// @dev The owner has no other privilege: it cannot pause, re-route, set fees, or touch Hook or user funds.
-    ///      Ownership is transferable via `transferOwner`.
-    address public owner;
+    /// @notice Owner-registered explicit lp pool definitions, keyed by the cur pool's PoolId.
+    mapping(PoolId => LpPool) public lpPools;
 
-    /// @notice Inner liquidity sources that may be registered as shell routes. Mutable by the owner.
-    mapping(PoolId innerPoolId => bool allowed) public allowedInnerPools;
-    mapping(PoolId outerPoolId => RegisteredRoute route) internal _registeredRoutes;
-    mapping(PoolId innerPoolId => bool registered) public innerPoolRegistered;
-    mapping(PoolId innerPoolId => PoolId outerPoolId) public outerPoolForInnerPool;
-    mapping(PoolId outerPoolId => bool enabled) public poolEnabled;
+    /// @notice Records the cur pool keys that have been initialized through this hook, keyed by PoolId.
+    mapping(PoolId => PoolKey) public initedPools;
 
-    constructor(
-        IPoolManager _poolManager,
-        IFewFactory _fewFactory,
-        IV4Quoter _quoter,
-        IWETH9 _weth,
-        PoolId[] memory _allowedInnerPoolIds,
-        address _owner
-    ) BaseHook(_poolManager) {
+    /// @notice Enumerable list of all cur pool PoolIds that have been initialized through this hook.
+    PoolId[] public initedPoolIds;
+
+    struct LpPool {
+        PoolKey lpPoolKey;
+        bool orderAligned;
+        bool set;
+    }
+
+    constructor(IPoolManager _poolManager, IFewFactory _fewFactory, IWETH9 _weth, IV4Quoter _v4Quoter)
+        BaseHook(_poolManager)
+        LpSettlement(_weth)
+    {
         if (
-            address(_poolManager) == address(0) || address(_fewFactory) == address(0) || address(_quoter) == address(0)
-                || address(_weth) == address(0) || _owner == address(0)
+            address(_poolManager) == address(0) || address(_fewFactory) == address(0) || address(_weth) == address(0)
+                || address(_v4Quoter) == address(0)
         ) {
             revert ZeroAddress();
         }
-        if (address(_quoter.poolManager()) != address(_poolManager)) revert QuoterPoolManagerMismatch();
-        if (_allowedInnerPoolIds.length == 0) revert EmptyInnerPoolAllowlist();
-
         fewFactory = _fewFactory;
-        quoter = _quoter;
         weth = _weth;
-        owner = _owner;
-
-        for (uint256 i; i < _allowedInnerPoolIds.length; ++i) {
-            PoolId innerPoolId = _allowedInnerPoolIds[i];
-            if (allowedInnerPools[innerPoolId]) revert DuplicateAllowedInnerPool(innerPoolId);
-            allowedInnerPools[innerPoolId] = true;
-            emit InnerPoolAllowed(innerPoolId);
-        }
+        v4Quoter = _v4Quoter;
     }
 
-    function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
-        return Hooks.Permissions({
-            beforeInitialize: true,
-            afterInitialize: false,
-            beforeAddLiquidity: true,
-            afterAddLiquidity: false,
-            beforeRemoveLiquidity: false,
-            afterRemoveLiquidity: false,
-            beforeSwap: true,
-            afterSwap: false,
-            beforeDonate: false,
-            afterDonate: false,
-            beforeSwapReturnDelta: true,
-            afterSwapReturnDelta: false,
-            afterAddLiquidityReturnDelta: false,
-            afterRemoveLiquidityReturnDelta: false
-        });
-    }
+    /// @notice Registers an explicit lp pool for the given cur pool. The `lpPoolKey`'s
+    ///         currency0/currency1 must be FewToken wrappers for curPoolKey.currency0/currency1
+    ///         respectively (in either order). The `lpPoolKey.hooks` is preserved, so a hooked lp
+    ///         pool may be registered. Passing an empty `lpPoolKey` (currency0 == address(0))
+    ///         removes the registration, causing the hook to fall back to FewFactory auto-inference.
+    function setLpPool(PoolKey calldata curPoolKey, PoolKey calldata lpPoolKey) external onlyOwner {
+        PoolId curPoolId = curPoolKey.toId();
+        if (address(initedPools[curPoolId].hooks) == address(0)) revert CurPoolNotInitialized(curPoolId);
 
-    /// @notice Enables or disables swaps for a registered outer pool. Only callable by the owner.
-    function setPoolEnabled(PoolId poolId, bool enabled) external onlyOwner {
-        if (!_registeredRoutes[poolId].registered) revert PoolDoesNotExist();
-        poolEnabled[poolId] = enabled;
-        emit PoolEnabledSet(poolId, enabled);
-    }
-
-    /// @notice Transfers ownership to a new address. Only callable by the current owner.
-    function transferOwner(address newOwner) external onlyOwner {
-        if (newOwner == address(0)) revert InvalidNewOwner();
-        address previousOwner = owner;
-        owner = newOwner;
-        emit OwnerTransferred(previousOwner, newOwner);
-    }
-
-    /// @notice Adds an inner pool to the allowlist so it can be registered as a shell route. Only callable by the owner.
-    function addAllowedInnerPool(PoolId innerPoolId) external onlyOwner {
-        allowedInnerPools[innerPoolId] = true;
-        emit InnerPoolAllowed(innerPoolId);
-    }
-
-    /// @notice Returns the immutable route registered for an outer pool.
-    function routeForPool(PoolId outerPoolId) external view returns (RegisteredRoute memory) {
-        RegisteredRoute memory route = _registeredRoutes[outerPoolId];
-        if (!route.registered) revert PoolDoesNotExist();
-        return route;
-    }
-
-    /// @notice Returns the exact hookless inner key used by an outer pool.
-    function innerPoolKey(PoolId outerPoolId) external view returns (PoolKey memory) {
-        RegisteredRoute storage route = _registeredRoute(outerPoolId);
-        return _innerPoolKey(route);
-    }
-
-    /// @notice Previews the canonical wrappers, allowlisted inner pool, ordering, and safe outer init price.
-    /// @dev Deployment tooling should call this immediately before initializing the outer pool.
-    function previewRoute(address token0, address token1, uint24 fee, int24 tickSpacing)
-        external
-        view
-        returns (address few0, address few1, PoolId innerPoolId, bool orderAligned, uint160 outerSqrtPriceX96)
-    {
-        RegisteredRoute memory route = _deriveRoute(token0, token1, fee, tickSpacing);
-        return (
-            route.few0,
-            route.few1,
-            route.innerPoolId,
-            route.orderAligned,
-            _recommendedOuterPrice(route.innerPoolId, route.orderAligned)
-        );
-    }
-
-    function _beforeInitialize(address, PoolKey calldata key, uint160 sqrtPriceX96) internal override returns (bytes4) {
-        RegisteredRoute memory route =
-            _deriveRoute(Currency.unwrap(key.currency0), Currency.unwrap(key.currency1), key.fee, key.tickSpacing);
-        uint160 expectedPrice = _recommendedOuterPrice(route.innerPoolId, route.orderAligned);
-        if (sqrtPriceX96 != expectedPrice) revert OuterPriceMismatch(sqrtPriceX96, expectedPrice);
-
-        PoolId outerPoolId = key.toId();
-        if (innerPoolRegistered[route.innerPoolId]) {
-            revert InnerPoolAlreadyRegistered(route.innerPoolId, outerPoolForInnerPool[route.innerPoolId]);
+        // Empty lpPoolKey (currency0 == address(0)) means removal.
+        if (Currency.unwrap(lpPoolKey.currency0) == address(0)) {
+            if (!lpPools[curPoolId].set) return;
+            delete lpPools[curPoolId];
+            emit LpPoolRemoved(curPoolId);
+            return;
         }
 
-        route.registered = true;
-        _registeredRoutes[outerPoolId] = route;
-        innerPoolRegistered[route.innerPoolId] = true;
-        outerPoolForInnerPool[route.innerPoolId] = outerPoolId;
-        poolEnabled[outerPoolId] = true;
+        // Validate: lpPoolKey.currency0/currency1 must be FewToken wrappers for curPoolKey's
+        // currencies (in either order). Native ETH (address(0)) maps to WETH for comparison.
+        address curLookup0 = Currency.unwrap(curPoolKey.currency0);
+        address curLookup1 = Currency.unwrap(curPoolKey.currency1);
+        curLookup0 = curLookup0 == address(0) ? address(weth) : curLookup0;
+        curLookup1 = curLookup1 == address(0) ? address(weth) : curLookup1;
+        address few0 = Currency.unwrap(lpPoolKey.currency0);
+        address few1 = Currency.unwrap(lpPoolKey.currency1);
+        if (few0.code.length == 0 || few1.code.length == 0) revert ZeroAddress();
 
-        emit AggregatorPoolRegistered(outerPoolId);
-        emit ShellPoolRegistered(outerPoolId, route.innerPoolId, route.few0, route.few1, route.orderAligned);
-        return IHooks.beforeInitialize.selector;
-    }
-
-    /// @dev Any address may add liquidity to a registered outer shell pool; the hook only restricts swapability.
-    function _beforeAddLiquidity(address, PoolKey calldata, ModifyLiquidityParams calldata, bytes calldata)
-        internal
-        pure
-        override
-        returns (bytes4)
-    {
-        return IHooks.beforeAddLiquidity.selector;
-    }
-
-    function _beforeSwap(address sender, PoolKey calldata key, SwapParams calldata params, bytes calldata hookData)
-        internal
-        override
-        nonReentrant
-        returns (bytes4, BeforeSwapDelta, uint24)
-    {
-        PoolId outerPoolId = key.toId();
-        RegisteredRoute storage route = _registeredRoute(outerPoolId);
-        if (!poolEnabled[outerPoolId]) revert PoolDisabled(outerPoolId);
-        if (hookData.length != 0) revert UnexpectedHookData();
-        _validateAmount(params.amountSpecified);
-
-        bool innerZeroForOne = params.zeroForOne == route.orderAligned;
-        if (params.amountSpecified < 0) {
-            uint256 requestedInput = uint256(-params.amountSpecified);
-            _requireSettlementInventory(params.zeroForOne ? route.token0 : route.token1, requestedInput);
+        address underlying0 = IFewWrappedToken(few0).token();
+        address underlying1 = IFewWrappedToken(few1).token();
+        bool orderAligned;
+        if (underlying0 == curLookup0 && underlying1 == curLookup1) {
+            orderAligned = true;
+        } else if (underlying0 == curLookup1 && underlying1 == curLookup0) {
+            orderAligned = false;
+        } else {
+            revert WrapperUnderlyingMismatch(few0, curLookup0, underlying0);
         }
 
-        (uint256 amountIn, uint256 amountOut) =
-            _executeInnerSwap(route, innerZeroForOne, params.amountSpecified, params.sqrtPriceLimitX96);
-        _requireSettlementInventory(params.zeroForOne ? route.token0 : route.token1, amountIn);
-        _convertAndSettle(route, params.zeroForOne, amountIn, amountOut);
-
-        int128 specifiedDelta = (-params.amountSpecified).toInt128();
-        int128 unspecifiedDelta = params.amountSpecified < 0 ? -amountOut.toInt128() : amountIn.toInt128();
-
-        emit ShellSwap(
-            outerPoolId, route.innerPoolId, sender, params.zeroForOne, params.amountSpecified, amountIn, amountOut
-        );
-        _emitHookSwap(outerPoolId, sender, params.zeroForOne, amountIn, amountOut);
-
-        return (IHooks.beforeSwap.selector, toBeforeSwapDelta(specifiedDelta, unspecifiedDelta), 0);
+        lpPools[curPoolId] = LpPool({lpPoolKey: lpPoolKey, orderAligned: orderAligned, set: true});
+        emit LpPoolSet(curPoolId, lpPoolKey);
     }
 
-    /// @inheritdoc IAggregatorHook
-    /// @dev Runs the official V4Quoter against the outer key so the quote simulates the complete nested
-    ///      swap, physical PoolManager inventory check, wrap, and unwrap. Call only as a top-level quote.
-    function quote(bool zeroToOne, int256 amountSpecified, PoolId outerPoolId)
+    // ---------------------------------------------------------------------
+    // Quote
+    // ---------------------------------------------------------------------
+
+    /// @notice Quotes the expected amountUnspecified for a swap through the hook's lp route.
+    ///         Uses the stored V4Quoter to simulate the lp pool swap. Since wrap/unwrap is 1:1,
+    ///         the lp pool quote equals the effective quote the user would receive.
+    /// @dev Not marked `view` because V4Quoter uses revert-based simulation. Does not modify state.
+    function quote(bool zeroToOne, int256 amountSpecified, PoolId poolId)
         external
         override
         returns (uint256 amountUnspecified)
     {
-        _validateAmount(amountSpecified);
-        RegisteredRoute storage route = _registeredRoute(outerPoolId);
-        uint128 exactAmount = uint128(amountSpecified < 0 ? uint256(-amountSpecified) : uint256(amountSpecified));
-        IV4Quoter.QuoteExactSingleParams memory params = IV4Quoter.QuoteExactSingleParams({
-            poolKey: _outerPoolKey(route), zeroForOne: zeroToOne, exactAmount: exactAmount, hookData: bytes("")
-        });
+        PoolKey memory curKey = initedPools[poolId];
+        if (address(curKey.hooks) == address(0)) revert CurPoolNotInitialized(poolId);
+
+        LpRouteLib.LpRoute memory route = _deriveLpRoute(curKey);
+        if (!route.available) revert LpRouteUnavailable();
+
+        bool lpZeroForOne = zeroToOne == route.orderAligned;
+        PoolKey memory lpKey = route.lpKeyFromRoute();
 
         if (amountSpecified < 0) {
-            (amountUnspecified,) = quoter.quoteExactInputSingle(params);
+            uint256 exactAmount = uint256(-amountSpecified);
+            (amountUnspecified,) = v4Quoter.quoteExactInputSingle(
+                IV4Quoter.QuoteExactSingleParams({
+                    poolKey: lpKey, zeroForOne: lpZeroForOne, exactAmount: uint128(exactAmount), hookData: bytes("")
+                })
+            );
         } else {
-            (amountUnspecified,) = quoter.quoteExactOutputSingle(params);
+            uint256 exactAmount = uint256(amountSpecified);
+            (amountUnspecified,) = v4Quoter.quoteExactOutputSingle(
+                IV4Quoter.QuoteExactSingleParams({
+                    poolKey: lpKey, zeroForOne: lpZeroForOne, exactAmount: uint128(exactAmount), hookData: bytes("")
+                })
+            );
         }
     }
 
-    /// @inheritdoc IAggregatorHook
-    /// @dev This is an active-liquidity depth proxy, not accounting TVL. PoolManager ERC20 balances are
-    ///      singleton-global and therefore cannot honestly be assigned to an individual inner pool.
-    function pseudoTotalValueLocked(PoolId outerPoolId)
+    /// @notice Returns a liquidity-depth proxy for the cur pool, expressed in the cur pool's currency
+    ///         order. Reads the lp pool's sqrtPriceX96 and active liquidity and computes virtual amounts.
+    /// @dev This is an active-liquidity depth proxy, not accounting TVL. Returns (0, 0) if the lp pool
+    ///      is unavailable, uninitialized, or has no active liquidity.
+    function pseudoTotalValueLocked(PoolId poolId)
         external
         view
         override
         returns (uint256 amount0, uint256 amount1)
     {
-        RegisteredRoute storage route = _registeredRoute(outerPoolId);
-        (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(route.innerPoolId);
-        uint128 liquidity = poolManager.getLiquidity(route.innerPoolId);
+        PoolKey memory curKey = initedPools[poolId];
+        if (address(curKey.hooks) == address(0)) revert CurPoolNotInitialized(poolId);
+
+        LpRouteLib.LpRoute memory route = _deriveLpRoute(curKey);
+        if (!route.available) return (0, 0);
+
+        (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(route.lpPoolId);
+        uint128 liquidity = poolManager.getLiquidity(route.lpPoolId);
         if (sqrtPriceX96 == 0 || liquidity == 0) return (0, 0);
 
         uint256 virtual0 = FullMath.mulDiv(uint256(liquidity), 1 << 96, sqrtPriceX96);
@@ -341,258 +224,157 @@ contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregator
         return route.orderAligned ? (virtual0, virtual1) : (virtual1, virtual0);
     }
 
-    /// @notice Physical singleton inventory currently available for the shell's flash input leg.
-    /// @dev This is PoolManager-wide inventory, not route-owned TVL. The router repays it during settlement.
-    function availableSettlementInventory(PoolId outerPoolId, bool zeroToOne) external view returns (uint256) {
-        RegisteredRoute storage route = _registeredRoute(outerPoolId);
-        Currency input = Currency.wrap(zeroToOne ? route.token0 : route.token1);
-        return input.balanceOf(address(poolManager));
+    /// @dev Required to receive native ETH from PoolManager.take() and WETH9.withdraw().
+    receive() external payable {}
+
+    function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
+        Hooks.Permissions memory permissions;
+        permissions.beforeInitialize = true;
+        permissions.beforeSwap = true;
+        permissions.beforeSwapReturnDelta = true;
+        return permissions;
     }
 
-    function _deriveRoute(address token0, address token1, uint24 fee, int24 tickSpacing)
+    function _beforeInitialize(address, PoolKey calldata key, uint160) internal override returns (bytes4) {
+        PoolId id = key.toId();
+        initedPools[id] = key;
+        initedPoolIds.push(id);
+        return IHooks.beforeInitialize.selector;
+    }
+
+    /// @notice Returns the number of cur pools that have been initialized through this hook.
+    function initedPoolCount() external view returns (uint256) {
+        return initedPoolIds.length;
+    }
+
+    function _beforeSwap(
+        address sender,
+        PoolKey calldata key,
+        SwapParams calldata params,
+        bytes calldata /*hookData*/
+    )
         internal
-        view
-        returns (RegisteredRoute memory route)
+        override
+        nonReentrant
+        returns (bytes4, BeforeSwapDelta, uint24)
     {
-        if (token0 >= token1) revert InvalidOuterCurrencies();
-        if (fee.isDynamicFee()) revert DynamicFeeNotSupported();
-        fee.validate();
+        PoolId curPoolId = key.toId();
 
-        address origin0 = token0 == address(0) ? address(weth) : token0;
-        address origin1 = token1 == address(0) ? address(weth) : token1;
+        // lp is the only execution venue. If no route is available, revert.
+        LpRouteLib.LpRoute memory route = _deriveLpRoute(key);
+        if (!route.available) revert LpRouteUnavailable();
 
-        address few0 = fewFactory.getWrappedToken(origin0);
-        address few1 = fewFactory.getWrappedToken(origin1);
-        if (few0 == address(0)) revert CanonicalWrapperMissing(origin0);
-        if (few1 == address(0)) revert CanonicalWrapperMissing(origin1);
-        if (few0 == few1) revert InvalidWrapper(origin1, few1);
-        if (few0 == origin0 || few0 == origin1 || few0.code.length == 0) revert InvalidWrapper(origin0, few0);
-        if (few1 == origin0 || few1 == origin1 || few1.code.length == 0) revert InvalidWrapper(origin1, few1);
+        bool lpZeroForOne = params.zeroForOne == route.orderAligned;
 
-        address underlying0 = IFewWrappedToken(few0).token();
-        address underlying1 = IFewWrappedToken(few1).token();
-        if (underlying0 != origin0) revert WrapperUnderlyingMismatch(few0, origin0, underlying0);
-        if (underlying1 != origin1) revert WrapperUnderlyingMismatch(few1, origin1, underlying1);
-
-        bool orderAligned = few0 < few1;
-        PoolKey memory innerKey = PoolKey({
-            currency0: Currency.wrap(orderAligned ? few0 : few1),
-            currency1: Currency.wrap(orderAligned ? few1 : few0),
-            fee: fee,
-            tickSpacing: tickSpacing,
-            hooks: IHooks(address(0))
-        });
-        PoolId innerPoolId = innerKey.toId();
-        if (!allowedInnerPools[innerPoolId]) revert InnerPoolNotAllowed(innerPoolId);
-
-        (uint160 innerSqrtPriceX96,,,) = poolManager.getSlot0(innerPoolId);
-        if (innerSqrtPriceX96 == 0) revert InnerPoolNotInitialized(innerPoolId);
-        if (poolManager.getLiquidity(innerPoolId) == 0) revert InnerPoolHasNoActiveLiquidity(innerPoolId);
-
-        route = RegisteredRoute({
-            token0: token0,
-            token1: token1,
-            few0: few0,
-            few1: few1,
-            fee: fee,
-            tickSpacing: tickSpacing,
-            innerPoolId: innerPoolId,
-            orderAligned: orderAligned,
-            registered: false
-        });
-    }
-
-    function _recommendedOuterPrice(PoolId innerPoolId, bool orderAligned) internal view returns (uint160) {
-        (uint160 innerSqrtPriceX96,,,) = poolManager.getSlot0(innerPoolId);
-        if (innerSqrtPriceX96 == 0) revert InnerPoolNotInitialized(innerPoolId);
-        if (orderAligned) return innerSqrtPriceX96;
-
-        uint256 inverse = FullMath.mulDiv(1 << 96, 1 << 96, innerSqrtPriceX96);
-        if (inverse <= TickMath.MIN_SQRT_PRICE || inverse >= TickMath.MAX_SQRT_PRICE) {
-            revert InvalidMirroredPrice(inverse);
+        // Pre-swap check (exact-input only): PoolManager must already hold enough origin input
+        // token for the flash conversion leg. Fails fast before spending gas on the lp swap.
+        if (params.amountSpecified < 0) {
+            uint256 requestedInput = uint256(-params.amountSpecified);
+            _requireSettlementInventory(params.zeroForOne ? route.token0 : route.token1, requestedInput);
         }
-        return uint160(inverse);
+
+        (uint256 amountIn, uint256 amountOut) =
+            _executeLpSwap(route, lpZeroForOne, params.amountSpecified, params.sqrtPriceLimitX96);
+
+        // Post-swap check (exact-output only): amountIn is unknown until the lp swap executes,
+        // so the pre-check was skipped. Verify PoolManager holds enough origin input now.
+        if (params.amountSpecified > 0) {
+            _requireSettlementInventory(params.zeroForOne ? route.token0 : route.token1, amountIn);
+        }
+
+        // Post-swap check: the few token contract must hold enough underlying origin token to
+        // fulfill the unwrap. This is independent of PoolManager's balance.
+        address fewOut = params.zeroForOne ? route.few1 : route.few0;
+        address outputUnderlying = IFewWrappedToken(fewOut).token();
+        uint256 availableUnderlying = IERC20(outputUnderlying).balanceOf(fewOut);
+        if (availableUnderlying < amountOut) {
+            revert LpInsufficientInventory(fewOut, availableUnderlying, amountOut);
+        }
+
+        convertAndSettle(route, params.zeroForOne, amountIn, amountOut);
+
+        int128 specifiedDelta = (-params.amountSpecified).toInt128();
+        int128 unspecifiedDelta = params.amountSpecified < 0 ? -amountOut.toInt128() : amountIn.toInt128();
+
+        emit LpSwap(
+            curPoolId, route.lpPoolId, sender, params.zeroForOne, true, params.amountSpecified, amountIn, amountOut
+        );
+
+        return (IHooks.beforeSwap.selector, toBeforeSwapDelta(specifiedDelta, unspecifiedDelta), 0);
     }
 
-    function _executeInnerSwap(
-        RegisteredRoute storage route,
-        bool innerZeroForOne,
+    // ---------------------------------------------------------------------
+    // lp route derivation
+    // ---------------------------------------------------------------------
+
+    function _deriveLpRoute(PoolKey memory key) internal view returns (LpRouteLib.LpRoute memory route) {
+        address token0 = Currency.unwrap(key.currency0);
+        address token1 = Currency.unwrap(key.currency1);
+
+        // Native ETH (address(0)) maps to WETH for wrapper lookup. The lp pool uses FewWETH
+        // (whose underlying is WETH), and the hook bridges ETH <-> WETH <-> FewWETH atomically.
+        address lookup0 = token0 == address(0) ? address(weth) : token0;
+        address lookup1 = token1 == address(0) ? address(weth) : token1;
+
+        if (key.fee.isDynamicFee()) revert LpRouteUnavailable();
+
+        // 1. Owner-registered lp pool is the only source for the lp route.
+        LpPool memory registered = lpPools[key.toId()];
+        if (registered.set) {
+            PoolKey memory lpKey = registered.lpPoolKey;
+            bool orderAligned = registered.orderAligned;
+            // few0/few1 in the route always wrap cur token0/token1 respectively.
+            address regFew0 = Currency.unwrap(orderAligned ? lpKey.currency0 : lpKey.currency1);
+            address regFew1 = Currency.unwrap(orderAligned ? lpKey.currency1 : lpKey.currency0);
+            return LpRouteLib.buildRoute(
+                poolManager, token0, token1, regFew0, regFew1, lpKey.fee, lpKey.tickSpacing, lpKey.hooks, orderAligned
+            );
+        }
+
+        // 2. Fall back to FewFactory auto-inference, reusing the cur pool's fee and tick spacing.
+        address few0 = fewFactory.getWrappedToken(lookup0);
+        address few1 = fewFactory.getWrappedToken(lookup1);
+        return LpRouteLib.buildRoute(
+            poolManager, token0, token1, few0, few1, key.fee, key.tickSpacing, IHooks(address(0)), few0 < few1
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // ---------------------------------------------------------------------
+    // lp swap execution
+    // ---------------------------------------------------------------------
+
+    function _executeLpSwap(
+        LpRouteLib.LpRoute memory route,
+        bool lpZeroForOne,
         int256 amountSpecified,
-        uint160 outerPriceLimitX96
+        uint160 curPriceLimitX96
     ) internal returns (uint256 amountIn, uint256 amountOut) {
-        PoolKey memory innerKey = _innerPoolKey(route);
-        uint160 innerLimit = _mapInnerPriceLimit(route.orderAligned, innerZeroForOne, outerPriceLimitX96);
+        uint160 lpLimit = LpPriceLib.mapLpPriceLimit(route.orderAligned, lpZeroForOne, curPriceLimitX96);
+
         BalanceDelta delta = poolManager.swap(
-            innerKey,
-            SwapParams({zeroForOne: innerZeroForOne, amountSpecified: amountSpecified, sqrtPriceLimitX96: innerLimit}),
+            route.lpKeyFromRoute(),
+            SwapParams({zeroForOne: lpZeroForOne, amountSpecified: amountSpecified, sqrtPriceLimitX96: lpLimit}),
             bytes("")
         );
 
-        int128 inputDelta = innerZeroForOne ? delta.amount0() : delta.amount1();
-        int128 outputDelta = innerZeroForOne ? delta.amount1() : delta.amount0();
-        if (inputDelta >= 0 || outputDelta <= 0) revert InnerSwapDirectionMismatch();
+        int128 inputDelta = lpZeroForOne ? delta.amount0() : delta.amount1();
+        int128 outputDelta = lpZeroForOne ? delta.amount1() : delta.amount0();
+        if (inputDelta >= 0 || outputDelta <= 0) revert LpSwapDirectionMismatch();
 
         amountIn = uint256(-int256(inputDelta));
         amountOut = uint256(int256(outputDelta));
+
         uint256 expected = amountSpecified < 0 ? uint256(-amountSpecified) : uint256(amountSpecified);
         uint256 actualSpecified = amountSpecified < 0 ? amountIn : amountOut;
-        if (actualSpecified != expected) revert InnerSwapPartialFill(actualSpecified, expected);
+        if (actualSpecified != expected) revert LpSwapPartialFill(actualSpecified, expected);
     }
 
-    /// @dev Reversing the token order also reverses sqrt(price). The rounding direction is chosen so
-    ///      the mapped inner limit is never looser than the caller's outer limit.
-    function _mapInnerPriceLimit(bool orderAligned, bool innerZeroForOne, uint160 outerLimit)
-        internal
-        pure
-        returns (uint160)
-    {
-        if (orderAligned) return outerLimit;
-
-        uint256 mapped = innerZeroForOne
-            ? FullMath.mulDivRoundingUp(1 << 96, 1 << 96, outerLimit)
-            : FullMath.mulDiv(1 << 96, 1 << 96, outerLimit);
-
-        if (innerZeroForOne && mapped <= TickMath.MIN_SQRT_PRICE) mapped = TickMath.MIN_SQRT_PRICE + 1;
-        if (!innerZeroForOne && mapped >= TickMath.MAX_SQRT_PRICE) mapped = TickMath.MAX_SQRT_PRICE - 1;
-        if (mapped <= TickMath.MIN_SQRT_PRICE || mapped >= TickMath.MAX_SQRT_PRICE) {
-            revert InvalidMirroredPrice(mapped);
-        }
-        return uint160(mapped);
-    }
-
-    function _convertAndSettle(RegisteredRoute storage route, bool outerZeroForOne, uint256 amountIn, uint256 amountOut)
-        internal
-    {
-        Currency input = Currency.wrap(outerZeroForOne ? route.token0 : route.token1);
-        Currency output = Currency.wrap(outerZeroForOne ? route.token1 : route.token0);
-        address fewIn = outerZeroForOne ? route.few0 : route.few1;
-        address fewOut = outerZeroForOne ? route.few1 : route.few0;
-
-        uint256 inputBaseline = input.balanceOfSelf();
-        uint256 fewInBaseline = IERC20(fewIn).balanceOf(address(this));
-        _take(input, address(this), amountIn);
-        _wrapExact(input, fewIn, amountIn);
-        _settleExact(Currency.wrap(fewIn), amountIn);
-        _requireBalance(input, inputBaseline);
-        _requireBalance(Currency.wrap(fewIn), fewInBaseline);
-
-        uint256 outputBaseline = output.balanceOfSelf();
-        uint256 fewOutBaseline = IERC20(fewOut).balanceOf(address(this));
-        _take(Currency.wrap(fewOut), address(this), amountOut);
-        _unwrapExact(fewOut, output, amountOut);
-        _settleExact(output, amountOut);
-        _requireBalance(Currency.wrap(fewOut), fewOutBaseline);
-        _requireBalance(output, outputBaseline);
-    }
-
-    function _wrapExact(Currency input, address fewToken, uint256 amount) internal {
-        uint256 inputBefore = input.balanceOfSelf();
-        uint256 fewBefore = IERC20(fewToken).balanceOf(address(this));
-
-        if (Currency.unwrap(input) == address(0)) {
-            weth.deposit{value: amount}();
-            IERC20(address(weth)).forceApprove(fewToken, amount);
-            uint256 returnedAmount = IFewWrappedToken(fewToken).wrap(amount);
-            IERC20(address(weth)).forceApprove(fewToken, 0);
-            if (returnedAmount != amount) revert WrapReturnMismatch(returnedAmount, amount);
-        } else {
-            IERC20(Currency.unwrap(input)).forceApprove(fewToken, amount);
-            uint256 returnedAmount = IFewWrappedToken(fewToken).wrap(amount);
-            IERC20(Currency.unwrap(input)).forceApprove(fewToken, 0);
-            if (returnedAmount != amount) revert WrapReturnMismatch(returnedAmount, amount);
-        }
-
-        if (inputBefore < amount) {
-            revert InsufficientConversionBalance(Currency.unwrap(input), inputBefore, amount);
-        }
-        _requireBalance(input, inputBefore - amount);
-        _requireBalance(Currency.wrap(fewToken), fewBefore + amount);
-    }
-
-    function _unwrapExact(address fewToken, Currency output, uint256 amount) internal {
-        uint256 fewBefore = IERC20(fewToken).balanceOf(address(this));
-        uint256 outputBefore = output.balanceOfSelf();
-        uint256 returnedAmount = IFewWrappedToken(fewToken).unwrap(amount);
-        if (returnedAmount != amount) revert UnwrapReturnMismatch(returnedAmount, amount);
-
-        if (Currency.unwrap(output) == address(0)) {
-            weth.withdraw(amount);
-        }
-
-        if (fewBefore < amount) revert InsufficientConversionBalance(fewToken, fewBefore, amount);
-        _requireBalance(Currency.wrap(fewToken), fewBefore - amount);
-        _requireBalance(output, outputBefore + amount);
-    }
-
-    function _settleExact(Currency currency, uint256 amount) internal {
-        poolManager.sync(currency);
-        if (Currency.unwrap(currency) == address(0)) {
-            poolManager.settle{value: amount}();
-        } else {
-            currency.transfer(address(poolManager), amount);
-            poolManager.settle();
-        }
-    }
-
-    function _requireBalance(Currency currency, uint256 expected) internal view {
-        uint256 actual = currency.balanceOfSelf();
-        if (actual != expected) revert TokenBalanceMismatch(Currency.unwrap(currency), expected, actual);
-    }
-
+    /// @dev Verifies the PoolManager holds enough origin token to fulfill the flash conversion
+    ///      input leg. Reusing LpInsufficientInventory for a consistent error surface.
     function _requireSettlementInventory(address token, uint256 amount) internal view {
         uint256 available =
             token == address(0) ? address(poolManager).balance : IERC20(token).balanceOf(address(poolManager));
-        if (available < amount) revert InsufficientSettlementInventory(token, available, amount);
-    }
-
-    function _validateAmount(int256 amountSpecified) internal pure {
-        if (
-            amountSpecified == 0 || amountSpecified > int256(type(int128).max)
-                || amountSpecified < -int256(type(int128).max)
-        ) {
-            revert AmountOutOfRange(amountSpecified);
-        }
-    }
-
-    function _registeredRoute(PoolId outerPoolId) internal view returns (RegisteredRoute storage route) {
-        route = _registeredRoutes[outerPoolId];
-        if (!route.registered) revert PoolDoesNotExist();
-    }
-
-    function _innerPoolKey(RegisteredRoute storage route) internal view returns (PoolKey memory) {
-        return PoolKey({
-            currency0: Currency.wrap(route.orderAligned ? route.few0 : route.few1),
-            currency1: Currency.wrap(route.orderAligned ? route.few1 : route.few0),
-            fee: route.fee,
-            tickSpacing: route.tickSpacing,
-            hooks: IHooks(address(0))
-        });
-    }
-
-    function _outerPoolKey(RegisteredRoute storage route) internal view returns (PoolKey memory) {
-        return PoolKey({
-            currency0: Currency.wrap(route.token0),
-            currency1: Currency.wrap(route.token1),
-            fee: route.fee,
-            tickSpacing: route.tickSpacing,
-            hooks: IHooks(address(this))
-        });
-    }
-
-    function _emitHookSwap(PoolId outerPoolId, address sender, bool zeroForOne, uint256 amountIn, uint256 amountOut)
-        internal
-    {
-        int256 signedIn = amountIn.toInt256();
-        int256 signedOut = amountOut.toInt256();
-        (int256 amount0, int256 amount1) = zeroForOne ? (signedIn, -signedOut) : (-signedOut, signedIn);
-        // This field is the fee added by the aggregator Hook itself. The inner v4 PoolManager Swap
-        // event separately reports its LP + v4 protocol fee; the shell adds no additional fee.
-        emit HookSwap(outerPoolId, sender, amount0, amount1, 0);
-    }
-
-    receive() external payable {}
-
-    function _pay(Currency currency, address, uint256 amount) internal override {
-        currency.transfer(address(poolManager), amount);
+        if (available < amount) revert LpInsufficientInventory(token, available, amount);
     }
 }

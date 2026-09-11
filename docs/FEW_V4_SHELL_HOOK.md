@@ -1,7 +1,7 @@
 # FewToken v4 壳池
 
 > 更新日期：2026-09-01
-> 状态：review package 已整理；未部署、未审计，也未确认被 Uniswap routing 自动发现
+> 状态：review package 已整理；Hook 已部署到 Ethereum mainnet，但未审计，也未确认被 Uniswap routing 自动发现
 
 ## 结论
 
@@ -29,18 +29,17 @@ A/B outer pool（零 LP）
 | 成交 | exact-in 和 exact-out 都必须完整成交，少 1 wei 即整笔回滚 |
 | price limit | V1 只接受 v4 canonical extreme；反序 token 采用严格 reciprocal rounding |
 | wrap / unwrap | 返回值和真实余额变化同时检查，approval 每次归零 |
-| 管理权限 | 无 proxy、pause、route setter、fee setter、sweep；owner immutable 且不可转移，唯一权限是给 outer pool 加流动性 |
+| 管理权限 | 无 proxy、pause、fee setter、sweep；owner 是单一可转移 owner，唯一业务权限是注册/移除显式 lp pool，并按合约权限执行其他 owner 操作 |
 | 额外收费 | 无；用户只支付 inner v4 池现有 LP/protocol fee |
-| native ETH | V1 不支持；WETH 作为普通 ERC-20 可以支持 |
+| native ETH | cur pool 可以使用 native ETH；Hook 通过 WETH/FewWETH 完成原子转换 |
 
-Hook 权限 mask 是 `0x2888`：
+Hook 权限 mask 是 `0x2088`：
 
 - `beforeInitialize`
-- `beforeAddLiquidity`
 - `beforeSwap`
 - `beforeSwapReturnDelta`
 
-`beforeAddLiquidity` 只放行 owner：`sender` 在 v4 里是调用 PoolManager 的 router，所以判定分两种情况——`sender == owner`（owner 自己实现 unlock 的合约），或 `sender == positionManager` 且 `ownerOf(uint256(salt)) == owner`（Uniswap 前端路径，PositionManager 用 tokenId 作为 position salt，并在调用 hook 之前就 mint 好 ERC-721）。
+当前版本不启用 `beforeAddLiquidity`；cur pool 的流动性由 v4 core 正常处理，Hook 不在添加流动性路径上做 owner 校验。显式 lp pool 的注册和移除由 `LpOwner.onlyOwner` 保护。
 
 owner 的 outer 流动性是惰性库存：`beforeSwapReturnDelta` 吃掉全部 amount 后 `Pool.swap` 收到 0 并直接返回零 delta，因此 outer 池的头寸永远不参与成交、也拿不到手续费；它的唯一作用是把 origin token 物理余额留在 PoolManager 里，供 wrap 前的原子 `take` 使用。移除流动性不过 hook 校验（`beforeRemoveLiquidity` 保持 false），但 v4 只允许头寸持有者动它。donate 未启用 `beforeDonate`，在 outer 池无流动性时由 v4 core 自身拒绝。
 
@@ -88,7 +87,7 @@ Ethereum mainnet 固定块 `25,833,244` 还验证了真实：
 2. 在目标块重新跑 fork、库存和各 size quote 矩阵。
 3. 用 `script/MineFewV4ShellHookAddress.s.sol` 读取 inner 池并生成当前 init code 对应的 salt/address。
 4. 人工核对 factory、quoter、PoolManager、inner PoolId、fee、tick spacing 和 Hook mask。
-5. 用 `script/DeployFewV4ShellHook.s.sol` 部署并初始化 outer pool；先只做 USDC/USDT 单 pair。
+5. 使用 `script/DeployFewV4ShellHookWithOwner.s.sol` 部署 Hook，并通过 `HOOK_OWNER` 在同一部署流程中设置 owner；该脚本不会初始化 outer pool。部署后再由 owner/LP 按目标 PoolKey 单独初始化并提供所需库存；先只做 USDC/USDT 单 pair。
 6. source verify 后，用 Universal Router 和生产 0x quote API 做双向、多个金额档的 read-only 验证。
 7. 只有 API 返回结果明确包含该 Hook route，才能把状态改成“已被聚合器考虑”；看到真实成交后才能改成“已有流量”。
 
