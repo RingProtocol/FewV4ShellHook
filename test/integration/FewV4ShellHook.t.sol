@@ -413,7 +413,8 @@ abstract contract FewV4ShellHookIntegrationBase is Deployers {
 
     function test_initializeRejectsWrongOuterPriceAndDuplicateInnerRegistration() public {
         (uint160 expectedPrice,,,) = manager.getSlot0(outerPoolId);
-        uint160 wrongPrice = expectedPrice + 1;
+        // OUTER_PRICE_TOLERANCE_BPS = 200 (2% on sqrtPrice). Use 3% to exceed tolerance.
+        uint160 wrongPrice = uint160(uint256(expectedPrice) * 103 / 100);
         vm.expectRevert(
             _wrappedBeforeInitializeError(
                 abi.encodeWithSelector(FewV4ShellHook.OuterPriceMismatch.selector, wrongPrice, expectedPrice)
