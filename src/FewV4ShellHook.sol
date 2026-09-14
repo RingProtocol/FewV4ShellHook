@@ -118,6 +118,12 @@ contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregator
         _;
     }
 
+    /// @notice Maximum basis-point deviation allowed between the supplied outer init price and the
+    ///         recommended price (which mirrors the inner pool's current sqrtPrice). 100 = 1% on the
+    ///         sqrtPrice level (~2% on price). Lets deploy tooling tolerate minor inner-pool price drift
+    ///         between `previewRoute` and `initialize`.
+    uint256 public constant OUTER_PRICE_TOLERANCE_BPS = 200;
+
     IFewFactory public immutable fewFactory;
     IV4Quoter public immutable quoter;
     IWETH9 public immutable weth;
@@ -238,7 +244,9 @@ contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregator
         RegisteredRoute memory route =
             _deriveRoute(Currency.unwrap(key.currency0), Currency.unwrap(key.currency1), key.fee, key.tickSpacing);
         uint160 expectedPrice = _recommendedOuterPrice(route.innerPoolId, route.orderAligned);
-        if (sqrtPriceX96 != expectedPrice) revert OuterPriceMismatch(sqrtPriceX96, expectedPrice);
+        if (!_withinPriceTolerance(sqrtPriceX96, expectedPrice)) {
+            revert OuterPriceMismatch(sqrtPriceX96, expectedPrice);
+        }
 
         PoolId outerPoolId = key.toId();
         if (innerPoolRegistered[route.innerPoolId]) {
@@ -412,6 +420,15 @@ contract FewV4ShellHook is BaseHook, DeltaResolver, ReentrancyGuard, IAggregator
             revert InvalidMirroredPrice(inverse);
         }
         return uint160(inverse);
+    }
+
+    /// @dev Returns true when `supplied` is within `OUTER_PRICE_TOLERANCE_BPS` basis points of `expected`.
+    ///      Compared on the sqrtPrice level, so the effective price tolerance is roughly 2x this value.
+    function _withinPriceTolerance(uint160 supplied, uint160 expected) internal pure returns (bool) {
+        if (supplied == expected) return true;
+        uint256 diff = supplied > expected ? supplied - expected : expected - supplied;
+        // diff * 10000 <= expected * OUTER_PRICE_TOLERANCE_BPS
+        return diff * 10000 <= uint256(expected) * OUTER_PRICE_TOLERANCE_BPS;
     }
 
     function _executeInnerSwap(
