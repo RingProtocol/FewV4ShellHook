@@ -44,7 +44,7 @@ import {LpOwner} from "./base/LpOwner.sol";
 ///      hookData is ignored.
 //
 ///      Safety model:
-///      - a single transferable `owner` (set to the deployer at construction) can register explicit
+///      - a single transferable `owner` (set by the constructor argument) can register explicit
 ///        lp pool mappings; there is no upgrade, fee, pause, or sweep capability;
 ///      - anyone may add liquidity to the shell pool;
 ///      - routing always goes to lp; the shell pool is never used as a lp venue;
@@ -70,6 +70,7 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
     error LpRouteUnavailable();
     error LpInsufficientInventory(address token, uint256 available, uint256 required);
     error ShellPoolNotInitialized(PoolId shellPoolId);
+    error QuoteAmountTooLarge(uint256 amount, uint256 max);
 
     event LpSwap(
         PoolId indexed shellPoolId,
@@ -103,9 +104,10 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
         bool set;
     }
 
-    constructor(IPoolManager _poolManager, IFewFactory _fewFactory, IWETH9 _weth, IV4Quoter _v4Quoter)
+    constructor(IPoolManager _poolManager, IFewFactory _fewFactory, IWETH9 _weth, IV4Quoter _v4Quoter, address _owner)
         BaseHook(_poolManager)
         LpSettlement(_weth)
+        LpOwner(_owner)
     {
         if (
             address(_poolManager) == address(0) || address(_fewFactory) == address(0) || address(_weth) == address(0)
@@ -168,6 +170,8 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
     ///         Uses the stored V4Quoter to simulate the lp pool swap. Since wrap/unwrap is 1:1,
     ///         the lp pool quote equals the effective quote the user would receive.
     /// @dev Not marked `view` because V4Quoter uses revert-based simulation. Does not modify state.
+    ///      Performs the same inventory checks as _beforeSwap so that a successful quote implies
+    ///      a successful swap (no false positives from missing PoolManager or fewToken inventory).
     function quote(bool zeroToOne, int256 amountSpecified, PoolId poolId)
         external
         override
@@ -182,20 +186,50 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
         bool lpZeroForOne = zeroToOne == route.orderAligned;
         PoolKey memory lpKey = route.lpKeyFromRoute();
 
+        // Reject amounts that would be truncated by the uint128 cast in V4Quoter params.
+        if (amountSpecified == 0) revert LpSwapPartialFill(0, 0);
+        uint256 exactAmount = amountSpecified < 0 ? uint256(-amountSpecified) : uint256(amountSpecified);
+        if (exactAmount > type(uint128).max) revert QuoteAmountTooLarge(exactAmount, type(uint128).max);
+
+        // Pre-check (exact-input only): PoolManager must hold enough origin input for the
+        // flash-take input leg. For exact-output, amountIn is unknown until the lp quote
+        // runs, so the check is deferred to after the V4Quoter call.
+        address inputToken = zeroToOne ? route.token0 : route.token1;
         if (amountSpecified < 0) {
-            uint256 exactAmount = uint256(-amountSpecified);
+            _requireSettlementInventory(inputToken, exactAmount);
+        }
+
+        // Pre-check (exact-output only): the few token contract for the output leg must hold
+        // enough underlying to fulfill the unwrap. The output amount IS the exactAmount.
+        // For exact-input, the output is unknown until the lp quote runs, so deferred.
+        address fewOut = zeroToOne ? route.few1 : route.few0;
+        address outputUnderlying = IFewWrappedToken(fewOut).token();
+
+        if (amountSpecified < 0) {
             (amountUnspecified,) = v4Quoter.quoteExactInputSingle(
                 IV4Quoter.QuoteExactSingleParams({
                     poolKey: lpKey, zeroForOne: lpZeroForOne, exactAmount: uint128(exactAmount), hookData: bytes("")
                 })
             );
+            // Post-check: the few token must hold enough underlying for the unwrapped output.
+            uint256 availableUnderlying = IERC20(outputUnderlying).balanceOf(fewOut);
+            if (availableUnderlying < amountUnspecified) {
+                revert LpInsufficientInventory(fewOut, availableUnderlying, amountUnspecified);
+            }
         } else {
-            uint256 exactAmount = uint256(amountSpecified);
+            // Exact-output: amountUnspecified is the input amount (amountIn).
             (amountUnspecified,) = v4Quoter.quoteExactOutputSingle(
                 IV4Quoter.QuoteExactSingleParams({
                     poolKey: lpKey, zeroForOne: lpZeroForOne, exactAmount: uint128(exactAmount), hookData: bytes("")
                 })
             );
+            // Post-check: PoolManager must hold enough origin input for the flash-take.
+            _requireSettlementInventory(inputToken, amountUnspecified);
+            // Post-check: the few token must hold enough underlying for the exact output.
+            uint256 availableUnderlying = IERC20(outputUnderlying).balanceOf(fewOut);
+            if (availableUnderlying < exactAmount) {
+                revert LpInsufficientInventory(fewOut, availableUnderlying, exactAmount);
+            }
         }
     }
 
@@ -203,12 +237,7 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
     ///         order. Reads the lp pool's sqrtPriceX96 and active liquidity and computes virtual amounts.
     /// @dev This is an active-liquidity depth proxy, not accounting TVL. Returns (0, 0) if the lp pool
     ///      is unavailable, uninitialized, or has no active liquidity.
-    function pseudoTotalValueLocked(PoolId poolId)
-        external
-        view
-        override
-        returns (uint256 amount0, uint256 amount1)
-    {
+    function pseudoTotalValueLocked(PoolId poolId) external view override returns (uint256 amount0, uint256 amount1) {
         PoolKey memory shellKey = initedPools[poolId];
         if (address(shellKey.hooks) == address(0)) revert ShellPoolNotInitialized(poolId);
 

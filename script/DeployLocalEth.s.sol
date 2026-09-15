@@ -100,7 +100,8 @@ contract DeployLocalEth is Script {
             IPoolManager(address(manager)),
             IFewFactory(address(factory)),
             IWETH9(address(weth)),
-            IV4Quoter(address(v4Quoter))
+            IV4Quoter(address(v4Quoter)),
+            address(this)
         );
         (address expectedHook, bytes32 salt) =
             HookMiner.find(create2Deployer, flags, type(FewV4ShellHook).creationCode, constructorArgs);
@@ -108,7 +109,8 @@ contract DeployLocalEth is Script {
             IPoolManager(address(manager)),
             IFewFactory(address(factory)),
             IWETH9(address(weth)),
-            IV4Quoter(address(v4Quoter))
+            IV4Quoter(address(v4Quoter)),
+            address(this)
         );
         require(address(hook) == expectedHook, "hook address mismatch");
         console2.log("FewV4ShellHook:", address(hook));
@@ -151,7 +153,7 @@ contract DeployLocalEth is Script {
 
         // Note: We rely on FewFactory auto-inference for the lp route (like DeployLocal.s.sol).
         // The hook derives the lp pool from getWrappedToken(WETH) and getWrappedToken(tokenB),
-        // reusing the shell pool's fee and tickSpacing. No setLpPool needed (owner is CREATE2 deployer).
+        // reusing the shell pool's fee and tickSpacing. No setLpPool needed (owner is constructor argument).
 
         // ------------------------------------------------------------------
         // 9. Add shell pool liquidity with native ETH
@@ -162,10 +164,7 @@ contract DeployLocalEth is Script {
         tokenB.approve(address(liquidityRouter), type(uint256).max);
         {
             ModifyLiquidityParams memory params = ModifyLiquidityParams({
-                tickLower: -887270,
-                tickUpper: 887270,
-                liquidityDelta: int128(int256(LIQUIDITY)),
-                salt: 0
+                tickLower: -887270, tickUpper: 887270, liquidityDelta: int128(int256(LIQUIDITY)), salt: 0
             });
             // Send generous ETH; PoolModifyLiquidityTest refunds excess
             liquidityRouter.modifyLiquidity{value: LIQUIDITY * 2}(shellKey, params, bytes(""));
@@ -195,10 +194,7 @@ contract DeployLocalEth is Script {
         // Add liquidity to lp pool (wide tick range to cover price moves in both directions)
         {
             ModifyLiquidityParams memory params = ModifyLiquidityParams({
-                tickLower: -7000,
-                tickUpper: 7000,
-                liquidityDelta: int128(int256(LIQUIDITY)),
-                salt: 0
+                tickLower: -7000, tickUpper: 7000, liquidityDelta: int128(int256(LIQUIDITY)), salt: 0
             });
             liquidityRouter.modifyLiquidity(lpKey, params, bytes(""));
         }
@@ -319,8 +315,7 @@ contract DeployLocalEth is Script {
         // 14. Verify hook has no residual balances
         // ------------------------------------------------------------------
         require(
-            IERC20(address(tokenB)).balanceOf(address(hook)) == 0
-                && IERC20(fewWETH).balanceOf(address(hook)) == 0
+            IERC20(address(tokenB)).balanceOf(address(hook)) == 0 && IERC20(fewWETH).balanceOf(address(hook)) == 0
                 && IERC20(fewTokenB).balanceOf(address(hook)) == 0,
             "hook has residual ERC20 balances"
         );

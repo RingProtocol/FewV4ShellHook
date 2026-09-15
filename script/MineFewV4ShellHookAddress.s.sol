@@ -15,6 +15,9 @@ import {IWETH9} from "v4-periphery/src/interfaces/external/IWETH9.sol";
 
 /// @notice Read-only preflight and CREATE2 address mining for FewV4ShellHook.
 ///
+/// Required:
+///   HOOK_OWNER
+///
 /// Optional Ethereum defaults:
 ///   V4_POOL_MANAGER, FEW_FACTORY, WETH9, V4_QUOTER
 contract MineFewV4ShellHookAddress is Script {
@@ -29,12 +32,14 @@ contract MineFewV4ShellHookAddress is Script {
         address factoryAddress = vm.envOr("FEW_FACTORY", FEW_FACTORY_DEFAULT);
         address wethAddress = vm.envOr("WETH9", WETH9_DEFAULT);
         address v4QuoterAddress = vm.envOr("V4_QUOTER", V4_QUOTER_DEFAULT);
+        address owner = vm.envAddress("HOOK_OWNER");
 
         bytes memory constructorArgs = abi.encode(
             IPoolManager(poolManagerAddress),
             IFewFactory(factoryAddress),
             IWETH9(wethAddress),
-            IV4Quoter(v4QuoterAddress)
+            IV4Quoter(v4QuoterAddress),
+            owner
         );
         uint160 flags = _flags();
         (address expectedHook, bytes32 salt) =

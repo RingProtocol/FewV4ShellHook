@@ -119,12 +119,15 @@ contract FewV4ShellHookForkTest is Test {
 
         // Deploy hook at mined address.
         V4Quoter v4Quoter = new V4Quoter(manager);
-        uint160 flags = uint160(Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.BEFORE_INITIALIZE_FLAG);
+        uint160 flags =
+            uint160(Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.BEFORE_INITIALIZE_FLAG);
         bytes memory constructorArgs =
-            abi.encode(manager, IFewFactory(FEW_FACTORY), IWETH9(WETH9), IV4Quoter(address(v4Quoter)));
+            abi.encode(manager, IFewFactory(FEW_FACTORY), IWETH9(WETH9), IV4Quoter(address(v4Quoter)), address(this));
         (address minedAddr, bytes32 salt) =
             HookMiner.find(address(this), flags, type(FewV4ShellHook).creationCode, constructorArgs);
-        hook = new FewV4ShellHook{salt: salt}(manager, IFewFactory(FEW_FACTORY), IWETH9(WETH9), IV4Quoter(address(v4Quoter)));
+        hook = new FewV4ShellHook{salt: salt}(
+            manager, IFewFactory(FEW_FACTORY), IWETH9(WETH9), IV4Quoter(address(v4Quoter)), address(this)
+        );
         assertEq(address(hook), minedAddr);
 
         // Construct shell pool key (USDC < USDT).

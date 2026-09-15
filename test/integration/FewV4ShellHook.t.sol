@@ -114,13 +114,15 @@ contract FewV4ShellHookTest is Test {
         tokenB.mint(address(manager), 1_000_000e18);
 
         // Deploy the hook at a mined address matching permission flags.
-        uint160 flags = uint160(Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.BEFORE_INITIALIZE_FLAG);
-        bytes memory constructorArgs =
-            abi.encode(manager, IFewFactory(address(factory)), IWETH9(address(weth)), IV4Quoter(address(v4Quoter)));
+        uint160 flags =
+            uint160(Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.BEFORE_INITIALIZE_FLAG);
+        bytes memory constructorArgs = abi.encode(
+            manager, IFewFactory(address(factory)), IWETH9(address(weth)), IV4Quoter(address(v4Quoter)), address(this)
+        );
         (address minedAddr, bytes32 salt) =
             HookMiner.find(address(this), flags, type(FewV4ShellHook).creationCode, constructorArgs);
         hook = new FewV4ShellHook{salt: salt}(
-            manager, IFewFactory(address(factory)), IWETH9(address(weth)), IV4Quoter(address(v4Quoter))
+            manager, IFewFactory(address(factory)), IWETH9(address(weth)), IV4Quoter(address(v4Quoter)), address(this)
         );
         assertEq(address(hook), minedAddr, "hook address mismatch");
 
@@ -191,28 +193,47 @@ contract FewV4ShellHookTest is Test {
     }
 
     function test_constructor_zeroAddress_reverts() public {
-        // FewFactory(0) and WETH(0) are blocked by the constructor.
+        // FewFactory(0), WETH(0), and owner(0) are blocked by the constructor.
         // We can't test PoolManager(0) directly because BaseHook's validateHookAddress
         // runs first and requires a specific address pattern.
-        uint160 flags = uint160(Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.BEFORE_INITIALIZE_FLAG);
+        uint160 flags =
+            uint160(Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.BEFORE_INITIALIZE_FLAG);
 
         // FewFactory(0)
-        bytes memory constructorArgsA =
-            abi.encode(manager, IFewFactory(address(0)), IWETH9(address(weth)), IV4Quoter(address(v4Quoter)));
+        bytes memory constructorArgsA = abi.encode(
+            manager, IFewFactory(address(0)), IWETH9(address(weth)), IV4Quoter(address(v4Quoter)), address(this)
+        );
         (address minedAddrA, bytes32 saltA) =
             HookMiner.find(address(this), flags, type(FewV4ShellHook).creationCode, constructorArgsA);
         vm.expectRevert(LpOwner.ZeroAddress.selector);
-        new FewV4ShellHook{salt: saltA}(manager, IFewFactory(address(0)), IWETH9(address(weth)), IV4Quoter(address(v4Quoter)));
+        new FewV4ShellHook{salt: saltA}(
+            manager, IFewFactory(address(0)), IWETH9(address(weth)), IV4Quoter(address(v4Quoter)), address(this)
+        );
         minedAddrA;
 
         // WETH(0)
-        bytes memory constructorArgsB =
-            abi.encode(manager, IFewFactory(address(factory)), IWETH9(address(0)), IV4Quoter(address(v4Quoter)));
+        bytes memory constructorArgsB = abi.encode(
+            manager, IFewFactory(address(factory)), IWETH9(address(0)), IV4Quoter(address(v4Quoter)), address(this)
+        );
         (address minedAddrB, bytes32 saltB) =
             HookMiner.find(address(this), flags, type(FewV4ShellHook).creationCode, constructorArgsB);
         vm.expectRevert(LpOwner.ZeroAddress.selector);
-        new FewV4ShellHook{salt: saltB}(manager, IFewFactory(address(factory)), IWETH9(address(0)), IV4Quoter(address(v4Quoter)));
+        new FewV4ShellHook{salt: saltB}(
+            manager, IFewFactory(address(factory)), IWETH9(address(0)), IV4Quoter(address(v4Quoter)), address(this)
+        );
         minedAddrB;
+
+        // Owner(0)
+        bytes memory constructorArgsC = abi.encode(
+            manager, IFewFactory(address(factory)), IWETH9(address(weth)), IV4Quoter(address(v4Quoter)), address(0)
+        );
+        (address minedAddrC, bytes32 saltC) =
+            HookMiner.find(address(this), flags, type(FewV4ShellHook).creationCode, constructorArgsC);
+        vm.expectRevert(LpOwner.ZeroAddress.selector);
+        new FewV4ShellHook{salt: saltC}(
+            manager, IFewFactory(address(factory)), IWETH9(address(weth)), IV4Quoter(address(v4Quoter)), address(0)
+        );
+        minedAddrC;
     }
 
     // ---------------------------------------------------------------------
@@ -660,8 +681,8 @@ contract FewV4ShellHookTest is Test {
     // Owner / admin tests
     // ---------------------------------------------------------------------
 
-    function test_ownerIsDeployer() public view {
-        assertEq(hook.owner(), address(this), "owner is deployer");
+    function test_ownerIsConstructorArgument() public view {
+        assertEq(hook.owner(), address(this), "owner is constructor argument");
     }
 
     function test_transferOwner_emitsAndUpdates() public {
@@ -942,6 +963,133 @@ contract FewV4ShellHookTest is Test {
         hook.quote(true, -int256(SWAP_AMOUNT), shellKey.toId());
     }
 
+    function test_quote_revertsWhenPoolManagerInventoryZero_exactInput() public {
+        // Quote succeeds only if PoolManager has enough input inventory.
+        // Here we drain PoolManager's input token so the quote should revert.
+        manager.initialize(lpKey, _lpPriceForBetterZeroForOne());
+        _addCurLiquidity(1e18);
+        _addLpLiquidity(LP_LIQUIDITY);
+
+        // Drain PoolManager's input token (token0 for zeroForOne).
+        address inputToken = Currency.unwrap(currency0);
+        uint256 pmBalance = MockERC20(inputToken).balanceOf(address(manager));
+        MockERC20(inputToken).burn(address(manager), pmBalance);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(FewV4ShellHook.LpInsufficientInventory.selector, inputToken, 0, SWAP_AMOUNT / 100)
+        );
+        hook.quote(true, -int256(SWAP_AMOUNT / 100), shellKey.toId());
+    }
+
+    function test_quote_revertsWhenPoolManagerInventoryZero_exactOutput() public {
+        // Same for exact-output: if PoolManager has no input token, the swap
+        // (and thus the quote) must fail. For exact-output, the input amount
+        // is unknown until the V4Quoter runs, so the post-check catches it.
+        manager.initialize(lpKey, _lpPriceForBetterZeroForOne());
+        _addCurLiquidity(1e18);
+        _addLpLiquidity(LP_LIQUIDITY);
+
+        // Drain PoolManager's input token (token0 for zeroForOne).
+        address inputToken = Currency.unwrap(currency0);
+        uint256 pmBalance = MockERC20(inputToken).balanceOf(address(manager));
+        MockERC20(inputToken).burn(address(manager), pmBalance);
+
+        // Exact-output: V4Quoter returns amountIn, then post-check fails.
+        // We don't know the exact amountIn, so check the selector via try/catch.
+        try hook.quote(true, int256(SWAP_AMOUNT / 100), shellKey.toId()) {
+            assertTrue(false, "expected revert");
+        } catch (bytes memory reason) {
+            assertEq(bytes4(reason), FewV4ShellHook.LpInsufficientInventory.selector, "selector");
+        }
+    }
+
+    function test_quote_revertsWhenFewOutInventoryZero_exactInput() public {
+        // Quote should fail if the output few token has no underlying to unwrap.
+        manager.initialize(lpKey, _lpPriceForBetterZeroForOne());
+        _addCurLiquidity(1e18);
+        _addLpLiquidity(LP_LIQUIDITY);
+
+        // Burn the output few token's underlying balance.
+        address fewOut = factory.getWrappedToken(Currency.unwrap(currency1));
+        address underlying = IFewWrappedToken(fewOut).token();
+        uint256 underlyingBal = MockERC20(underlying).balanceOf(fewOut);
+        MockERC20(underlying).burn(fewOut, underlyingBal);
+
+        // V4Quoter succeeds (lp pool swap only moves fewTokens), then our post-check fails.
+        // The output amount is unknown, so check the selector via try/catch.
+        try hook.quote(true, -int256(SWAP_AMOUNT / 100), shellKey.toId()) {
+            assertTrue(false, "expected revert");
+        } catch (bytes memory reason) {
+            assertEq(bytes4(reason), FewV4ShellHook.LpInsufficientInventory.selector, "selector");
+        }
+    }
+
+    function test_quote_revertsWhenFewOutInventoryZero_exactOutput() public {
+        // Same for exact-output.
+        manager.initialize(lpKey, _lpPriceForBetterZeroForOne());
+        _addCurLiquidity(1e18);
+        _addLpLiquidity(LP_LIQUIDITY);
+
+        address fewOut = factory.getWrappedToken(Currency.unwrap(currency1));
+        address underlying = IFewWrappedToken(fewOut).token();
+        uint256 underlyingBal = MockERC20(underlying).balanceOf(fewOut);
+        MockERC20(underlying).burn(fewOut, underlyingBal);
+
+        try hook.quote(true, int256(SWAP_AMOUNT / 100), shellKey.toId()) {
+            assertTrue(false, "expected revert");
+        } catch (bytes memory reason) {
+            assertEq(bytes4(reason), FewV4ShellHook.LpInsufficientInventory.selector, "selector");
+        }
+    }
+
+    function test_quote_revertsWhenAmountExceedsUint128() public {
+        // Amounts exceeding uint128.max must be rejected, not silently truncated.
+        manager.initialize(lpKey, _lpPriceForBetterZeroForOne());
+        _addCurLiquidity(1e18);
+        _addLpLiquidity(LP_LIQUIDITY);
+
+        // Use uint256 arithmetic to avoid overflow in the test itself.
+        uint256 tooLarge = uint256(type(uint128).max) + 1;
+
+        // Exact-input (negative amountSpecified).
+        vm.expectRevert(
+            abi.encodeWithSelector(FewV4ShellHook.QuoteAmountTooLarge.selector, tooLarge, type(uint128).max)
+        );
+        hook.quote(true, -int256(tooLarge), shellKey.toId());
+
+        // Exact-output (positive amountSpecified).
+        vm.expectRevert(
+            abi.encodeWithSelector(FewV4ShellHook.QuoteAmountTooLarge.selector, tooLarge, type(uint128).max)
+        );
+        hook.quote(true, int256(tooLarge), shellKey.toId());
+    }
+
+    function test_quote_revertsOnZeroAmount() public {
+        manager.initialize(lpKey, _lpPriceForBetterZeroForOne());
+        _addCurLiquidity(1e18);
+        _addLpLiquidity(LP_LIQUIDITY);
+
+        vm.expectRevert(abi.encodeWithSelector(FewV4ShellHook.LpSwapPartialFill.selector, 0, 0));
+        hook.quote(true, 0, shellKey.toId());
+    }
+
+    function test_quote_matchesActualSwap() public {
+        // A successful quote should match the actual swap result.
+        manager.initialize(lpKey, _lpPriceForBetterZeroForOne());
+        _addCurLiquidity(1e18);
+        _addLpLiquidity(LP_LIQUIDITY);
+
+        // Quote exact-input.
+        uint256 quotedOut = hook.quote(true, -int256(SWAP_AMOUNT / 100), shellKey.toId());
+
+        // Perform the actual swap.
+        BalanceDelta delta = _swapAsUser(true, -int256(SWAP_AMOUNT / 100));
+        int128 unspecifiedDelta = delta.amount1(); // zeroForOne: amount1 is the output.
+
+        // The quoted output should match the actual swap output.
+        assertEq(quotedOut, uint256(int256(unspecifiedDelta)), "quote matches swap");
+    }
+
     // ---------------------------------------------------------------------
     // pseudoTotalValueLocked tests
     // ---------------------------------------------------------------------
@@ -1017,9 +1165,7 @@ contract FewV4ShellHookTest is Test {
         // virtual0 = L * 2^96 / sqrtPrice → increases as price drops
         // virtual1 = L * sqrtPrice / 2^96 → decreases as price drops
         // But orderAligned may invert; just check they changed.
-        assertTrue(
-            amount0After != amount0Before || amount1After != amount1Before, "pseudo TVL changed after swap"
-        );
+        assertTrue(amount0After != amount0Before || amount1After != amount1Before, "pseudo TVL changed after swap");
     }
 
     // ---------------------------------------------------------------------
