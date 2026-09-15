@@ -33,7 +33,7 @@ import {MockFewFactory} from "../test/mocks/MockFewFactory.sol";
 import {MockWETH9} from "../test/mocks/MockWETH9.sol";
 
 /// @notice Local deployment script for testing FewV4ShellHook with native ETH.
-///         The cur pool uses native ETH (address(0)) as currency0 and an ERC20 as currency1.
+///         The shell pool uses native ETH (address(0)) as currency0 and an ERC20 as currency1.
 ///         The lp pool uses FewWETH (wrapping WETH) and FewTokenB (wrapping tokenB).
 ///         The hook bridges ETH <-> WETH <-> FewWETH atomically during the lp route.
 ///
@@ -74,7 +74,7 @@ contract DeployLocalEth is Script {
         MockWETH9 weth = new MockWETH9();
         console2.log("WETH:", address(weth));
 
-        // 3. Deploy mock ERC20 token (the non-ETH side of the cur pool)
+        // 3. Deploy mock ERC20 token (the non-ETH side of the shell pool)
         MockERC20 tokenB = new MockERC20("TokenB", "TB", 18);
         tokenB.mint(deployer, 1_000_000e18);
         console2.log("TokenB:", address(tokenB));
@@ -116,11 +116,11 @@ contract DeployLocalEth is Script {
         // ------------------------------------------------------------------
         // 7. Construct pool keys
         // ------------------------------------------------------------------
-        // Cur pool: native ETH (currency0, since address(0) < any token) / tokenB (currency1)
+        // Shell pool: native ETH (currency0, since address(0) < any token) / tokenB (currency1)
         Currency currency0 = Currency.wrap(address(0)); // native ETH
         Currency currency1 = Currency.wrap(address(tokenB));
 
-        PoolKey memory curKey = PoolKey({
+        PoolKey memory shellKey = PoolKey({
             currency0: currency0,
             currency1: currency1,
             fee: FEE,
@@ -144,17 +144,17 @@ contract DeployLocalEth is Script {
         console2.log("LP pool currency1:", Currency.unwrap(lpKey.currency1));
 
         // ------------------------------------------------------------------
-        // 8. Initialize cur pool
+        // 8. Initialize shell pool
         // ------------------------------------------------------------------
-        manager.initialize(curKey, SQRT_PRICE_1_1);
-        console2.log("Cur pool (ETH/TokenB) initialized at 1:1");
+        manager.initialize(shellKey, SQRT_PRICE_1_1);
+        console2.log("Shell pool (ETH/TokenB) initialized at 1:1");
 
         // Note: We rely on FewFactory auto-inference for the lp route (like DeployLocal.s.sol).
         // The hook derives the lp pool from getWrappedToken(WETH) and getWrappedToken(tokenB),
-        // reusing the cur pool's fee and tickSpacing. No setLpPool needed (owner is CREATE2 deployer).
+        // reusing the shell pool's fee and tickSpacing. No setLpPool needed (owner is CREATE2 deployer).
 
         // ------------------------------------------------------------------
-        // 9. Add cur pool liquidity with native ETH
+        // 9. Add shell pool liquidity with native ETH
         //    This funds the PoolManager with physical ETH, which the hook needs
         //    for the flash-take input leg during zeroForOne (ETH -> tokenB) swaps.
         //    Using a full-range position so the PoolManager receives ~LIQUIDITY ETH.
@@ -168,9 +168,9 @@ contract DeployLocalEth is Script {
                 salt: 0
             });
             // Send generous ETH; PoolModifyLiquidityTest refunds excess
-            liquidityRouter.modifyLiquidity{value: LIQUIDITY * 2}(curKey, params, bytes(""));
+            liquidityRouter.modifyLiquidity{value: LIQUIDITY * 2}(shellKey, params, bytes(""));
         }
-        console2.log("Cur pool liquidity added (full range):", LIQUIDITY);
+        console2.log("Shell pool liquidity added (full range):", LIQUIDITY);
 
         // ------------------------------------------------------------------
         // 10. Initialize lp pool and add liquidity
@@ -228,7 +228,7 @@ contract DeployLocalEth is Script {
             uint256 ethBefore = deployer.balance;
             uint256 tokenBBefore = tokenB.balanceOf(deployer);
 
-            (uint160 curPriceBefore,,,) = manager.getSlot0(curKey.toId());
+            (uint160 shellPriceBefore,,,) = manager.getSlot0(shellKey.toId());
             (uint160 lpPriceBefore,,,) = manager.getSlot0(lpKey.toId());
 
             PoolSwapTest.TestSettings memory settings =
@@ -236,7 +236,7 @@ contract DeployLocalEth is Script {
 
             // Send SWAP_AMOUNT ETH with the swap call; excess is refunded by PoolSwapTest
             BalanceDelta swapDelta = swapRouter.swap{value: SWAP_AMOUNT}(
-                curKey,
+                shellKey,
                 SwapParams({
                     zeroForOne: true,
                     amountSpecified: -int256(SWAP_AMOUNT),
@@ -246,7 +246,7 @@ contract DeployLocalEth is Script {
                 bytes("")
             );
 
-            (uint160 curPriceAfter,,,) = manager.getSlot0(curKey.toId());
+            (uint160 shellPriceAfter,,,) = manager.getSlot0(shellKey.toId());
             (uint160 lpPriceAfter,,,) = manager.getSlot0(lpKey.toId());
 
             uint256 ethAfter = deployer.balance;
@@ -254,15 +254,15 @@ contract DeployLocalEth is Script {
 
             console2.log("Delta amount0 (ETH):", int256(swapDelta.amount0()));
             console2.log("Delta amount1 (TokenB):", int256(swapDelta.amount1()));
-            console2.log("Cur price before:", curPriceBefore);
-            console2.log("Cur price after: ", curPriceAfter);
+            console2.log("Shell price before:", shellPriceBefore);
+            console2.log("Shell price after: ", shellPriceAfter);
             console2.log("LP price before: ", lpPriceBefore);
             console2.log("LP price after:  ", lpPriceAfter);
             console2.log("ETH consumed: ", ethBefore - ethAfter);
             console2.log("TokenB received:", tokenBAfter - tokenBBefore);
 
             if (lpPriceAfter != lpPriceBefore) {
-                console2.log("Result: LP pool was used (LP price moved, cur price unchanged)");
+                console2.log("Result: LP pool was used (LP price moved, shell price unchanged)");
             } else {
                 console2.log("Result: WARNING - LP price did not move");
             }
@@ -276,14 +276,14 @@ contract DeployLocalEth is Script {
             uint256 ethBefore = deployer.balance;
             uint256 tokenBBefore = tokenB.balanceOf(deployer);
 
-            (uint160 curPriceBefore,,,) = manager.getSlot0(curKey.toId());
+            (uint160 shellPriceBefore,,,) = manager.getSlot0(shellKey.toId());
             (uint160 lpPriceBefore,,,) = manager.getSlot0(lpKey.toId());
 
             PoolSwapTest.TestSettings memory settings =
                 PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
 
             BalanceDelta swapDelta = swapRouter.swap(
-                curKey,
+                shellKey,
                 SwapParams({
                     zeroForOne: false,
                     amountSpecified: -int256(SWAP_AMOUNT),
@@ -293,7 +293,7 @@ contract DeployLocalEth is Script {
                 bytes("")
             );
 
-            (uint160 curPriceAfter,,,) = manager.getSlot0(curKey.toId());
+            (uint160 shellPriceAfter,,,) = manager.getSlot0(shellKey.toId());
             (uint160 lpPriceAfter,,,) = manager.getSlot0(lpKey.toId());
 
             uint256 ethAfter = deployer.balance;
@@ -301,15 +301,15 @@ contract DeployLocalEth is Script {
 
             console2.log("Delta amount0 (ETH):", int256(swapDelta.amount0()));
             console2.log("Delta amount1 (TokenB):", int256(swapDelta.amount1()));
-            console2.log("Cur price before:", curPriceBefore);
-            console2.log("Cur price after: ", curPriceAfter);
+            console2.log("Shell price before:", shellPriceBefore);
+            console2.log("Shell price after: ", shellPriceAfter);
             console2.log("LP price before: ", lpPriceBefore);
             console2.log("LP price after:  ", lpPriceAfter);
             console2.log("TokenB consumed: ", tokenBBefore - tokenBAfter);
             console2.log("ETH received:", ethAfter - ethBefore);
 
             if (lpPriceAfter != lpPriceBefore) {
-                console2.log("Result: LP pool was used (LP price moved, cur price unchanged)");
+                console2.log("Result: LP pool was used (LP price moved, shell price unchanged)");
             } else {
                 console2.log("Result: WARNING - LP price did not move");
             }

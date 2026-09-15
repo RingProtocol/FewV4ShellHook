@@ -34,7 +34,7 @@ import {MockWETH9} from "../test/mocks/MockWETH9.sol";
 
 /// @notice Full local deployment script for testing on anvil.
 ///         Deploys everything from scratch: PoolManager, mock tokens, mock FewFactory,
-///         hook (mined address), cur pool init, lp pool init + liquidity, cur pool liquidity,
+///         hook (mined address), shell pool init, lp pool init + liquidity, shell pool liquidity,
 ///         and a test swap to verify the lp routing works.
 ///
 /// @dev Usage:
@@ -130,7 +130,7 @@ contract DeployLocal is Script {
             currency1 = Currency.wrap(address(tokenA));
         }
 
-        PoolKey memory curKey = PoolKey({
+        PoolKey memory shellKey = PoolKey({
             currency0: currency0,
             currency1: currency1,
             fee: FEE,
@@ -150,18 +150,18 @@ contract DeployLocal is Script {
             hooks: IHooks(address(0))
         });
 
-        // 9. Initialize cur pool at 1:1
-        manager.initialize(curKey, SQRT_PRICE_1_1);
-        console2.log("Cur pool initialized at 1:1");
+        // 9. Initialize shell pool at 1:1
+        manager.initialize(shellKey, SQRT_PRICE_1_1);
+        console2.log("Shell pool initialized at 1:1");
 
-        // 10. Add liquidity to cur pool
+        // 10. Add liquidity to shell pool
         {
             ModifyLiquidityParams memory params = ModifyLiquidityParams({
                 tickLower: -120, tickUpper: 120, liquidityDelta: int128(int256(LIQUIDITY)), salt: 0
             });
-            liquidityRouter.modifyLiquidity(curKey, params, bytes(""));
+            liquidityRouter.modifyLiquidity(shellKey, params, bytes(""));
         }
-        console2.log("Cur pool liquidity added:", LIQUIDITY);
+        console2.log("Shell pool liquidity added:", LIQUIDITY);
 
         // 11. Wrap tokens and add liquidity to lp pool at a better price for zeroForOne.
         uint160 lpInitPrice = orderAligned ? SQRT_PRICE_2_1 : SQRT_PRICE_1_2;
@@ -202,14 +202,14 @@ contract DeployLocal is Script {
         uint256 tokenInBefore = IERC20(Currency.unwrap(currency0)).balanceOf(deployer);
         uint256 tokenOutBefore = IERC20(Currency.unwrap(currency1)).balanceOf(deployer);
 
-        (uint160 curPriceBefore,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceBefore,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceBefore,,,) = manager.getSlot0(lpKey.toId());
 
         PoolSwapTest.TestSettings memory settings =
             PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
 
         BalanceDelta swapDelta = swapRouter.swap(
-            curKey,
+            shellKey,
             SwapParams({
                 zeroForOne: true, amountSpecified: -int256(SWAP_AMOUNT), sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
             }),
@@ -217,7 +217,7 @@ contract DeployLocal is Script {
             abi.encode(block.timestamp + 1 hours, uint256(1))
         );
 
-        (uint160 curPriceAfter,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceAfter,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceAfter,,,) = manager.getSlot0(lpKey.toId());
 
         uint256 tokenInAfter = IERC20(Currency.unwrap(currency0)).balanceOf(deployer);
@@ -227,17 +227,17 @@ contract DeployLocal is Script {
         console2.log("Swap amount (zeroForOne):", SWAP_AMOUNT);
         console2.log("Delta amount0:", int256(swapDelta.amount0()));
         console2.log("Delta amount1:", int256(swapDelta.amount1()));
-        console2.log("Cur price before:", curPriceBefore);
-        console2.log("Cur price after: ", curPriceAfter);
+        console2.log("Shell price before:", shellPriceBefore);
+        console2.log("Shell price after: ", shellPriceAfter);
         console2.log("Lp price before: ", lpPriceBefore);
         console2.log("Lp price after:  ", lpPriceAfter);
         console2.log("TokenIn consumed: ", tokenInBefore - tokenInAfter);
         console2.log("TokenOut received:", tokenOutAfter - tokenOutBefore);
 
         if (lpPriceAfter != lpPriceBefore) {
-            console2.log("Result: lp pool was used (lp price moved, cur price unchanged)");
-        } else if (curPriceAfter != curPriceBefore) {
-            console2.log("Result: cur pool was used (cur price moved)");
+            console2.log("Result: lp pool was used (lp price moved, shell price unchanged)");
+        } else if (shellPriceAfter != shellPriceBefore) {
+            console2.log("Result: shell pool was used (shell price moved)");
         } else {
             console2.log("Result: WARNING - neither pool moved");
         }

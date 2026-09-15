@@ -99,8 +99,8 @@ contract FewV4ShellHookForkTest is Test {
     IPoolManager internal manager;
     FewV4ShellHook internal hook;
     SafeSwapRouter internal swapRouter;
-    PoolKey internal curKey;
-    PoolId internal curPoolId;
+    PoolKey internal shellKey;
+    PoolId internal shellPoolId;
     PoolKey internal lpKey;
     bool internal orderAligned;
 
@@ -127,15 +127,15 @@ contract FewV4ShellHookForkTest is Test {
         hook = new FewV4ShellHook{salt: salt}(manager, IFewFactory(FEW_FACTORY), IWETH9(WETH9), IV4Quoter(address(v4Quoter)));
         assertEq(address(hook), minedAddr);
 
-        // Construct cur pool key (USDC < USDT).
-        curKey = PoolKey({
+        // Construct shell pool key (USDC < USDT).
+        shellKey = PoolKey({
             currency0: Currency.wrap(USDC),
             currency1: Currency.wrap(USDT),
             fee: FEE,
             tickSpacing: TICK_SPACING,
             hooks: IHooks(address(hook))
         });
-        curPoolId = curKey.toId();
+        shellPoolId = shellKey.toId();
 
         // Derive fb key the same way the hook does.
         address few0 = IFewFactory(FEW_FACTORY).getWrappedToken(USDC);
@@ -149,13 +149,13 @@ contract FewV4ShellHookForkTest is Test {
             hooks: IHooks(address(0))
         });
 
-        // Initialize cur pool at the lp pool's price (must be initialized before setLpPool).
+        // Initialize shell pool at the lp pool's price (must be initialized before setLpPool).
         (uint160 lpSqrtPrice,,,) = manager.getSlot0(LP_POOL_ID);
-        uint160 curInitPrice = orderAligned ? lpSqrtPrice : _invertPrice(lpSqrtPrice);
-        manager.initialize(curKey, curInitPrice);
+        uint160 shellInitPrice = orderAligned ? lpSqrtPrice : _invertPrice(lpSqrtPrice);
+        manager.initialize(shellKey, shellInitPrice);
 
         // Register the lp pool explicitly (no auto-inference fallback).
-        hook.setLpPool(curKey, lpKey);
+        hook.setLpPool(shellKey, lpKey);
 
         swapRouter = new SafeSwapRouter(manager);
         deal(USDC, USER, 1_000e6);
@@ -185,15 +185,15 @@ contract FewV4ShellHookForkTest is Test {
     }
 
     function test_realSwapRoutesToLp() public requireFork {
-        // lp is always the execution venue; cur price should not move.
-        (uint160 curPriceBefore,,,) = manager.getSlot0(curPoolId);
+        // lp is always the execution venue; shell price should not move.
+        (uint160 shellPriceBefore,,,) = manager.getSlot0(shellPoolId);
         (uint160 lpPriceBefore,,,) = manager.getSlot0(LP_POOL_ID);
 
         _swapAsUser(true, -int256(SWAP_AMOUNT));
 
-        (uint160 curPriceAfter,,,) = manager.getSlot0(curPoolId);
+        (uint160 shellPriceAfter,,,) = manager.getSlot0(shellPoolId);
         (uint160 lpPriceAfter,,,) = manager.getSlot0(LP_POOL_ID);
-        assertEq(curPriceAfter, curPriceBefore, "cur price unchanged");
+        assertEq(shellPriceAfter, shellPriceBefore, "shell price unchanged");
         assertTrue(lpPriceAfter != lpPriceBefore, "lp price moved");
     }
 
@@ -247,7 +247,7 @@ contract FewV4ShellHookForkTest is Test {
     {
         vm.prank(USER);
         return swapRouter.swap(
-            curKey,
+            shellKey,
             SwapParams({
                 zeroForOne: zeroForOne,
                 amountSpecified: amountSpecified,

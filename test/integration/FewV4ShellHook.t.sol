@@ -72,7 +72,7 @@ contract FewV4ShellHookTest is Test {
     address internal fewA;
     address internal fewB;
 
-    PoolKey internal curKey;
+    PoolKey internal shellKey;
     PoolKey internal lpKey;
     bool internal orderAligned;
 
@@ -141,7 +141,7 @@ contract FewV4ShellHookTest is Test {
         vm.stopPrank();
 
         // Construct pool keys.
-        curKey = PoolKey({
+        shellKey = PoolKey({
             currency0: currency0,
             currency1: currency1,
             fee: FEE,
@@ -161,11 +161,11 @@ contract FewV4ShellHookTest is Test {
             hooks: IHooks(address(0))
         });
 
-        // Initialize cur pool before registering lp pool (setLpPool requires the cur pool to be initialized).
-        manager.initialize(curKey, SQRT_PRICE_1_1);
+        // Initialize shell pool before registering lp pool (setLpPool requires the shell pool to be initialized).
+        manager.initialize(shellKey, SQRT_PRICE_1_1);
 
         // Register the lp pool explicitly (no auto-inference).
-        hook.setLpPool(curKey, lpKey);
+        hook.setLpPool(shellKey, lpKey);
     }
 
     // ---------------------------------------------------------------------
@@ -220,7 +220,7 @@ contract FewV4ShellHookTest is Test {
     // ---------------------------------------------------------------------
 
     function test_anyoneCanAddLiquidity() public {
-        // Initialize cur pool at 1:1.
+        // Initialize shell pool at 1:1.
 
         // Give LP some tokens.
         tokenA.mint(LP, 100e18);
@@ -233,25 +233,25 @@ contract FewV4ShellHookTest is Test {
 
         ModifyLiquidityParams memory params =
             ModifyLiquidityParams({tickLower: -60, tickUpper: 60, liquidityDelta: 1e18, salt: 0});
-        liquidityRouter.modifyLiquidity(curKey, params, bytes(""));
+        liquidityRouter.modifyLiquidity(shellKey, params, bytes(""));
         vm.stopPrank();
 
-        assertGt(manager.getLiquidity(curKey.toId()), 0, "liquidity added");
+        assertGt(manager.getLiquidity(shellKey.toId()), 0, "liquidity added");
     }
 
     // ---------------------------------------------------------------------
-    // Fallback to cur pool tests
+    // Fallback to shell pool tests
     // ---------------------------------------------------------------------
 
     function test_lpNotInitialized_reverts() public {
-        // Initialize cur pool only (lp pool not initialized). lp is the only venue, so revert.
+        // Initialize shell pool only (lp pool not initialized). lp is the only venue, so revert.
         _addCurLiquidity(1e18);
 
         _expectLpRevertOnSwap(true, -int256(SWAP_AMOUNT), FewV4ShellHook.LpRouteUnavailable.selector);
     }
 
     function test_lpHasNoLiquidity_reverts() public {
-        // Initialize both pools but only add liquidity to cur. fb has no liquidity → revert.
+        // Initialize both pools but only add liquidity to shell. fb has no liquidity → revert.
         manager.initialize(lpKey, SQRT_PRICE_1_1);
         _addCurLiquidity(1e18);
 
@@ -264,14 +264,14 @@ contract FewV4ShellHookTest is Test {
         _addCurLiquidity(1e18);
         _addLpLiquidity(1e18);
 
-        (uint160 curPriceBefore,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceBefore,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceBefore,,,) = manager.getSlot0(lpKey.toId());
 
         _swapAsUser(true, -int256(SWAP_AMOUNT / 1000));
 
-        (uint160 curPriceAfter,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceAfter,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceAfter,,,) = manager.getSlot0(lpKey.toId());
-        assertEq(curPriceAfter, curPriceBefore, "cur price unchanged");
+        assertEq(shellPriceAfter, shellPriceBefore, "shell price unchanged");
         assertTrue(lpPriceAfter != lpPriceBefore, "lp price moved");
     }
 
@@ -280,7 +280,7 @@ contract FewV4ShellHookTest is Test {
     // ---------------------------------------------------------------------
 
     function test_usesExplicitLp_zeroForOne() public {
-        // For zeroForOne (selling token0, buying token1), lp is better when lpPrice > curPrice.
+        // For zeroForOne (selling token0, buying token1), lp is better when lpPrice > shellPrice.
         // When orderAligned, fb sqrtPrice is directly comparable.
         // When !orderAligned, fb sqrtPrice is inverted: normalized = 2^192 / lpSqrtPrice.
         // So we set lp price to SQRT_PRICE_2_1 (higher) when orderAligned,
@@ -290,32 +290,32 @@ contract FewV4ShellHookTest is Test {
         _addCurLiquidity(1e18);
         _addLpLiquidity(LP_LIQUIDITY);
 
-        (uint160 curPriceBefore,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceBefore,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceBefore,,,) = manager.getSlot0(lpKey.toId());
 
         _swapAsUser(true, -int256(SWAP_AMOUNT), _fallbackData(1));
 
         (uint160 lpPriceAfter,,,) = manager.getSlot0(lpKey.toId());
-        (uint160 curPriceAfter,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceAfter,,,) = manager.getSlot0(shellKey.toId());
         assertTrue(lpPriceAfter != lpPriceBefore, "lp price moved");
-        assertEq(curPriceAfter, curPriceBefore, "cur price unchanged");
+        assertEq(shellPriceAfter, shellPriceBefore, "shell price unchanged");
     }
 
     function test_lpShallower_stillRoutesToLp() public {
-        // lp price is better for zeroForOne, and fb liquidity is shallower than cur.
+        // lp price is better for zeroForOne, and fb liquidity is shallower than shell.
         // lp is always used regardless of depth comparison.
         manager.initialize(lpKey, _lpPriceForBetterZeroForOne());
         _addCurLiquidity(1e18);
         _addLpLiquidity(0.5e18);
 
-        (uint160 curPriceBefore,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceBefore,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceBefore,,,) = manager.getSlot0(lpKey.toId());
 
         _swapAsUser(true, -int256(SWAP_AMOUNT / 1000));
 
-        (uint160 curPriceAfter,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceAfter,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceAfter,,,) = manager.getSlot0(lpKey.toId());
-        assertEq(curPriceAfter, curPriceBefore, "cur price unchanged");
+        assertEq(shellPriceAfter, shellPriceBefore, "shell price unchanged");
         assertTrue(lpPriceAfter != lpPriceBefore, "lp price moved");
     }
 
@@ -327,33 +327,33 @@ contract FewV4ShellHookTest is Test {
         _addCurLiquidity(1e18);
         _addLpLiquidity(LP_LIQUIDITY);
 
-        (uint160 curPriceBefore,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceBefore,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceBefore,,,) = manager.getSlot0(lpKey.toId());
 
         _swapAsUser(true, -int256(SWAP_AMOUNT / 1000));
 
-        (uint160 curPriceAfter,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceAfter,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceAfter,,,) = manager.getSlot0(lpKey.toId());
-        assertEq(curPriceAfter, curPriceBefore, "cur price unchanged");
+        assertEq(shellPriceAfter, shellPriceBefore, "shell price unchanged");
         assertTrue(lpPriceAfter != lpPriceBefore, "lp price moved");
     }
 
     function test_usesExplicitLp_oneForZero() public {
-        // For oneForZero (selling token1, buying token0), lp is better when lpPrice < curPrice.
+        // For oneForZero (selling token1, buying token0), lp is better when lpPrice < shellPrice.
         uint160 lpPrice = _lpPriceForBetterOneForZero();
         manager.initialize(lpKey, lpPrice);
         _addCurLiquidity(1e18);
         _addLpLiquidity(LP_LIQUIDITY);
 
-        (uint160 curPriceBefore,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceBefore,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceBefore,,,) = manager.getSlot0(lpKey.toId());
 
         _swapAsUser(false, -int256(SWAP_AMOUNT), _fallbackData(1));
 
         (uint160 lpPriceAfter,,,) = manager.getSlot0(lpKey.toId());
-        (uint160 curPriceAfter,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceAfter,,,) = manager.getSlot0(shellKey.toId());
         assertTrue(lpPriceAfter != lpPriceBefore, "lp price moved");
-        assertEq(curPriceAfter, curPriceBefore, "cur price unchanged");
+        assertEq(shellPriceAfter, shellPriceBefore, "shell price unchanged");
     }
 
     function test_lpRoute_hookBalancesZero() public {
@@ -375,14 +375,14 @@ contract FewV4ShellHookTest is Test {
         _addCurLiquidity(1e18);
         _addLpLiquidity(LP_LIQUIDITY);
 
-        (uint160 curPriceBefore,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceBefore,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceBefore,,,) = manager.getSlot0(lpKey.toId());
 
         _swapAsUser(true, -int256(SWAP_AMOUNT));
 
-        (uint160 curPriceAfter,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceAfter,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceAfter,,,) = manager.getSlot0(lpKey.toId());
-        assertEq(curPriceAfter, curPriceBefore, "cur price unchanged");
+        assertEq(shellPriceAfter, shellPriceBefore, "shell price unchanged");
         assertTrue(lpPriceAfter != lpPriceBefore, "lp price moved");
     }
 
@@ -391,14 +391,14 @@ contract FewV4ShellHookTest is Test {
         _addCurLiquidity(1e18);
         _addLpLiquidity(LP_LIQUIDITY);
 
-        (uint160 curPriceBefore,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceBefore,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceBefore,,,) = manager.getSlot0(lpKey.toId());
 
         _swapAsUser(false, -int256(SWAP_AMOUNT));
 
-        (uint160 curPriceAfter,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceAfter,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceAfter,,,) = manager.getSlot0(lpKey.toId());
-        assertEq(curPriceAfter, curPriceBefore, "cur price unchanged");
+        assertEq(shellPriceAfter, shellPriceBefore, "shell price unchanged");
         assertTrue(lpPriceAfter != lpPriceBefore, "lp price moved");
     }
 
@@ -407,14 +407,14 @@ contract FewV4ShellHookTest is Test {
         _addCurLiquidity(1e18);
         _addLpLiquidity(LP_LIQUIDITY);
 
-        (uint160 curPriceBefore,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceBefore,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceBefore,,,) = manager.getSlot0(lpKey.toId());
 
         _swapAsUser(true, int256(SWAP_AMOUNT));
 
-        (uint160 curPriceAfter,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceAfter,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceAfter,,,) = manager.getSlot0(lpKey.toId());
-        assertEq(curPriceAfter, curPriceBefore, "cur price unchanged");
+        assertEq(shellPriceAfter, shellPriceBefore, "shell price unchanged");
         assertTrue(lpPriceAfter != lpPriceBefore, "lp price moved");
     }
 
@@ -432,7 +432,7 @@ contract FewV4ShellHookTest is Test {
     }
 
     function test_lpDeeperButTooShallowRevertsOnPartialFill() public {
-        // lp is strictly deeper than cur but still too shallow for the requested amount.
+        // lp is strictly deeper than shell but still too shallow for the requested amount.
         // The lp swap cannot fill completely, so the whole transaction reverts.
         manager.initialize(lpKey, SQRT_PRICE_1_1);
         _addCurLiquidity(0.001e18);
@@ -445,7 +445,7 @@ contract FewV4ShellHookTest is Test {
             PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
 
         try swapRouter.swap(
-            curKey,
+            shellKey,
             SwapParams({
                 zeroForOne: true, amountSpecified: -int256(SWAP_AMOUNT), sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
             }),
@@ -512,7 +512,7 @@ contract FewV4ShellHookTest is Test {
     }
 
     function test_lpUnavailable_reverts() public {
-        // fb unavailable → revert (no cur fallback).
+        // fb unavailable → revert (no shell fallback).
         _addCurLiquidity(1e18);
 
         _expectLpRevertOnSwap(true, -int256(SWAP_AMOUNT), FewV4ShellHook.LpRouteUnavailable.selector);
@@ -524,14 +524,14 @@ contract FewV4ShellHookTest is Test {
         _addCurLiquidity(1e18);
         _addLpLiquidity(LP_LIQUIDITY);
 
-        (uint160 curPriceBefore,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceBefore,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceBefore,,,) = manager.getSlot0(lpKey.toId());
 
         _swapAsUser(true, -int256(SWAP_AMOUNT), _fallbackData(0));
 
-        (uint160 curPriceAfter,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceAfter,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceAfter,,,) = manager.getSlot0(lpKey.toId());
-        assertEq(curPriceAfter, curPriceBefore, "cur price unchanged");
+        assertEq(shellPriceAfter, shellPriceBefore, "shell price unchanged");
         assertTrue(lpPriceAfter != lpPriceBefore, "lp price moved");
     }
 
@@ -542,14 +542,14 @@ contract FewV4ShellHookTest is Test {
         _addLpLiquidity(LP_LIQUIDITY);
         vm.warp(100);
 
-        (uint160 curPriceBefore,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceBefore,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceBefore,,,) = manager.getSlot0(lpKey.toId());
 
         _swapAsUser(true, -int256(SWAP_AMOUNT), abi.encode(uint256(99), uint256(1)));
 
-        (uint160 curPriceAfter,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceAfter,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceAfter,,,) = manager.getSlot0(lpKey.toId());
-        assertEq(curPriceAfter, curPriceBefore, "cur price unchanged");
+        assertEq(shellPriceAfter, shellPriceBefore, "shell price unchanged");
         assertTrue(lpPriceAfter != lpPriceBefore, "lp price moved");
     }
 
@@ -559,14 +559,14 @@ contract FewV4ShellHookTest is Test {
         _addCurLiquidity(1e18);
         _addLpLiquidity(LP_LIQUIDITY);
 
-        (uint160 curPriceBefore,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceBefore,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceBefore,,,) = manager.getSlot0(lpKey.toId());
 
         _swapAsUser(true, -int256(SWAP_AMOUNT), _fallbackData(type(uint256).max));
 
-        (uint160 curPriceAfter,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceAfter,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceAfter,,,) = manager.getSlot0(lpKey.toId());
-        assertEq(curPriceAfter, curPriceBefore, "cur price unchanged");
+        assertEq(shellPriceAfter, shellPriceBefore, "shell price unchanged");
         assertTrue(lpPriceAfter != lpPriceBefore, "lp price moved");
     }
 
@@ -575,14 +575,14 @@ contract FewV4ShellHookTest is Test {
         _addCurLiquidity(1e18);
         _addLpLiquidity(LP_LIQUIDITY);
 
-        (uint160 curPriceBefore,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceBefore,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceBefore,,,) = manager.getSlot0(lpKey.toId());
 
         _swapAsUser(false, int256(SWAP_AMOUNT), _fallbackData(type(uint256).max));
 
-        (uint160 curPriceAfter,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceAfter,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceAfter,,,) = manager.getSlot0(lpKey.toId());
-        assertEq(curPriceAfter, curPriceBefore, "cur price unchanged");
+        assertEq(shellPriceAfter, shellPriceBefore, "shell price unchanged");
         assertTrue(lpPriceAfter != lpPriceBefore, "lp price moved");
     }
 
@@ -591,14 +591,14 @@ contract FewV4ShellHookTest is Test {
         _addCurLiquidity(1e18);
         _addLpLiquidity(LP_LIQUIDITY);
 
-        (uint160 curPriceBefore,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceBefore,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceBefore,,,) = manager.getSlot0(lpKey.toId());
 
         _swapAsUser(true, int256(SWAP_AMOUNT), _fallbackData(type(uint256).max));
 
-        (uint160 curPriceAfter,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceAfter,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceAfter,,,) = manager.getSlot0(lpKey.toId());
-        assertEq(curPriceAfter, curPriceBefore, "cur price unchanged");
+        assertEq(shellPriceAfter, shellPriceBefore, "shell price unchanged");
         assertTrue(lpPriceAfter != lpPriceBefore, "lp price moved");
     }
 
@@ -608,14 +608,14 @@ contract FewV4ShellHookTest is Test {
         _addCurLiquidity(1e18);
         _addLpLiquidity(LP_LIQUIDITY);
 
-        (uint160 curPriceBefore,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceBefore,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceBefore,,,) = manager.getSlot0(lpKey.toId());
 
         _swapAsUser(false, int256(SWAP_AMOUNT), _fallbackData(1));
 
-        (uint160 curPriceAfter,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceAfter,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceAfter,,,) = manager.getSlot0(lpKey.toId());
-        assertEq(curPriceAfter, curPriceBefore, "cur price unchanged");
+        assertEq(shellPriceAfter, shellPriceBefore, "shell price unchanged");
         assertTrue(lpPriceAfter != lpPriceBefore, "lp price moved");
     }
 
@@ -632,7 +632,7 @@ contract FewV4ShellHookTest is Test {
 
         vm.expectRevert();
         swapRouter.swap(
-            curKey,
+            shellKey,
             SwapParams({zeroForOne: true, amountSpecified: 0, sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1}),
             settings,
             bytes("")
@@ -645,14 +645,14 @@ contract FewV4ShellHookTest is Test {
         _addCurLiquidity(1e18);
         _addLpLiquidity(LP_LIQUIDITY);
 
-        (uint160 curPriceBefore,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceBefore,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceBefore,,,) = manager.getSlot0(lpKey.toId());
 
         _swapAsUser(true, -int256(SWAP_AMOUNT), bytes("invalid"));
 
-        (uint160 curPriceAfter,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceAfter,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceAfter,,,) = manager.getSlot0(lpKey.toId());
-        assertEq(curPriceAfter, curPriceBefore, "cur price unchanged");
+        assertEq(shellPriceAfter, shellPriceBefore, "shell price unchanged");
         assertTrue(lpPriceAfter != lpPriceBefore, "lp price moved");
     }
 
@@ -693,8 +693,8 @@ contract FewV4ShellHookTest is Test {
         hook.transferOwner(newOwner);
 
         vm.prank(newOwner);
-        hook.setLpPool(curKey, lpKey);
-        (,, bool isSet) = hook.lpPools(curKey.toId());
+        hook.setLpPool(shellKey, lpKey);
+        (,, bool isSet) = hook.lpPools(shellKey.toId());
         assertTrue(isSet, "new owner registered");
     }
 
@@ -704,10 +704,10 @@ contract FewV4ShellHookTest is Test {
 
     function test_setLpPool_emitsAndRegisters() public {
         vm.expectEmit(true, false, false, true);
-        emit FewV4ShellHook.LpPoolSet(curKey.toId(), lpKey);
-        hook.setLpPool(curKey, lpKey);
+        emit FewV4ShellHook.LpPoolSet(shellKey.toId(), lpKey);
+        hook.setLpPool(shellKey, lpKey);
 
-        (PoolKey memory rKey,, bool rSet) = hook.lpPools(curKey.toId());
+        (PoolKey memory rKey,, bool rSet) = hook.lpPools(shellKey.toId());
         assertTrue(rSet, "registered");
         assertEq(Currency.unwrap(rKey.currency0), Currency.unwrap(lpKey.currency0), "currency0");
         assertEq(Currency.unwrap(rKey.currency1), Currency.unwrap(lpKey.currency1), "currency1");
@@ -720,13 +720,13 @@ contract FewV4ShellHookTest is Test {
 
         vm.prank(attacker);
         vm.expectRevert(abi.encodeWithSelector(LpOwner.NotOwner.selector, attacker, address(this)));
-        hook.setLpPool(curKey, lpKey);
+        hook.setLpPool(shellKey, lpKey);
     }
 
     function test_setLpPool_emptyKeyRemovesRegistration() public {
         // Register first.
-        hook.setLpPool(curKey, lpKey);
-        (,, bool isSet) = hook.lpPools(curKey.toId());
+        hook.setLpPool(shellKey, lpKey);
+        (,, bool isSet) = hook.lpPools(shellKey.toId());
         assertTrue(isSet, "registered");
 
         // Empty lpPoolKey (currency0 == address(0)) removes the registration.
@@ -739,16 +739,16 @@ contract FewV4ShellHookTest is Test {
         });
 
         vm.expectEmit(true, false, false, false);
-        emit FewV4ShellHook.LpPoolRemoved(curKey.toId());
-        hook.setLpPool(curKey, emptyKey);
+        emit FewV4ShellHook.LpPoolRemoved(shellKey.toId());
+        hook.setLpPool(shellKey, emptyKey);
 
-        (,, bool rSet) = hook.lpPools(curKey.toId());
+        (,, bool rSet) = hook.lpPools(shellKey.toId());
         assertFalse(rSet, "removed");
     }
 
     function test_setLpPool_emptyKeyRemoval_revertsForNonOwner() public {
         // Register first.
-        hook.setLpPool(curKey, lpKey);
+        hook.setLpPool(shellKey, lpKey);
 
         PoolKey memory emptyKey = PoolKey({
             currency0: Currency.wrap(address(0)),
@@ -761,16 +761,16 @@ contract FewV4ShellHookTest is Test {
         address attacker = makeAddr("attacker");
         vm.prank(attacker);
         vm.expectRevert(abi.encodeWithSelector(LpOwner.NotOwner.selector, attacker, address(this)));
-        hook.setLpPool(curKey, emptyKey);
+        hook.setLpPool(shellKey, emptyKey);
     }
 
     function test_registeredLpPoolUsesRegisteredFee() public {
-        // Register an lp pool with a DIFFERENT fee than the cur pool to confirm the registered
-        // fee/tickSpacing is used (not the cur pool's).
+        // Register an lp pool with a DIFFERENT fee than the shell pool to confirm the registered
+        // fee/tickSpacing is used (not the shell pool's).
         uint24 registeredFee = 3000;
         int24 registeredTickSpacing = 60;
 
-        // Build the registered fb key (different fee/tickSpacing than curKey).
+        // Build the registered fb key (different fee/tickSpacing than shellKey).
         bool lpOrderAligned = fewA < fewB;
         PoolKey memory registeredLpKey = PoolKey({
             currency0: Currency.wrap(lpOrderAligned ? fewA : fewB),
@@ -784,22 +784,22 @@ contract FewV4ShellHookTest is Test {
         _addCurLiquidity(1e18);
         _addLpLiquidityWithKey(registeredLpKey, LP_LIQUIDITY);
 
-        hook.setLpPool(curKey, registeredLpKey);
+        hook.setLpPool(shellKey, registeredLpKey);
 
-        (uint160 curPriceBefore,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceBefore,,,) = manager.getSlot0(shellKey.toId());
         (uint160 registeredLpPriceBefore,,,) = manager.getSlot0(registeredLpKey.toId());
 
         _swapAsUser(true, -int256(SWAP_AMOUNT));
 
-        (uint160 curPriceAfter,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceAfter,,,) = manager.getSlot0(shellKey.toId());
         (uint160 registeredLpPriceAfter,,,) = manager.getSlot0(registeredLpKey.toId());
-        assertEq(curPriceAfter, curPriceBefore, "cur price unchanged");
+        assertEq(shellPriceAfter, shellPriceBefore, "shell price unchanged");
         assertTrue(registeredLpPriceAfter != registeredLpPriceBefore, "registered lp price moved");
     }
 
     function test_registeredLpPoolWithHook_routesToHookedPool() public {
         // Register an lp pool that carries a (no-op) hook. The hook must be preserved so the swap
-        // routes to the hooked pool, not the hookless pool with the same fee/tickSpacing/currencies.
+        // routes to the hooked pool, not the hookless pool with the same fee/tickSpacing/shellrencies.
         // Mine an address with the AFTER_INITIALIZE_FLAG bit set (matching the hook's permission).
         uint160 hookFlags = uint160(Hooks.AFTER_INITIALIZE_FLAG);
         bytes memory hookConstructorArgs = bytes("");
@@ -823,22 +823,22 @@ contract FewV4ShellHookTest is Test {
         _addLpLiquidityWithKey(hookedLpKey, LP_LIQUIDITY);
 
         // Register the hooked lp pool.
-        hook.setLpPool(curKey, hookedLpKey);
+        hook.setLpPool(shellKey, hookedLpKey);
 
-        (uint160 curPriceBefore,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceBefore,,,) = manager.getSlot0(shellKey.toId());
         (uint160 hookedLpPriceBefore,,,) = manager.getSlot0(hookedLpKey.toId());
 
         _swapAsUser(true, -int256(SWAP_AMOUNT));
 
-        (uint160 curPriceAfter,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceAfter,,,) = manager.getSlot0(shellKey.toId());
         (uint160 hookedLpPriceAfter,,,) = manager.getSlot0(hookedLpKey.toId());
-        assertEq(curPriceAfter, curPriceBefore, "cur price unchanged");
+        assertEq(shellPriceAfter, shellPriceBefore, "shell price unchanged");
         assertTrue(hookedLpPriceAfter != hookedLpPriceBefore, "hooked lp price moved");
     }
 
     function test_emptyKeyRemovalFallsBackToAutoInference() public {
         // Register then remove via empty key.
-        hook.setLpPool(curKey, lpKey);
+        hook.setLpPool(shellKey, lpKey);
 
         PoolKey memory emptyKey = PoolKey({
             currency0: Currency.wrap(address(0)),
@@ -847,21 +847,21 @@ contract FewV4ShellHookTest is Test {
             tickSpacing: 0,
             hooks: IHooks(address(0))
         });
-        hook.setLpPool(curKey, emptyKey);
+        hook.setLpPool(shellKey, emptyKey);
 
         // After removal, the hook falls back to FewFactory auto-inference.
         manager.initialize(lpKey, _lpPriceForBetterZeroForOne());
         _addCurLiquidity(1e18);
         _addLpLiquidity(LP_LIQUIDITY);
 
-        (uint160 curPriceBefore,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceBefore,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceBefore,,,) = manager.getSlot0(lpKey.toId());
 
         _swapAsUser(true, -int256(SWAP_AMOUNT));
 
-        (uint160 curPriceAfter,,,) = manager.getSlot0(curKey.toId());
+        (uint160 shellPriceAfter,,,) = manager.getSlot0(shellKey.toId());
         (uint160 lpPriceAfter,,,) = manager.getSlot0(lpKey.toId());
-        assertEq(curPriceAfter, curPriceBefore, "cur price unchanged");
+        assertEq(shellPriceAfter, shellPriceBefore, "shell price unchanged");
         assertTrue(lpPriceAfter != lpPriceBefore, "auto-inferred lp price moved");
     }
 
@@ -879,11 +879,11 @@ contract FewV4ShellHookTest is Test {
         });
 
         vm.expectRevert(LpOwner.ZeroAddress.selector);
-        hook.setLpPool(curKey, bogusLpKey);
+        hook.setLpPool(shellKey, bogusLpKey);
     }
 
     function test_registeredLpPoolWithWrongUnderlying_revertsAtSetTime() public {
-        // Register an lp pool where the wrappers don't correspond to the cur pool's tokens at all.
+        // Register an lp pool where the wrappers don't correspond to the shell pool's tokens at all.
         // setLpPool validates wrappers at registration time, so this is rejected immediately.
         address fakeWrapper = address(new MockFewWrappedToken(makeAddr("wrongUnderlying")));
 
@@ -901,7 +901,7 @@ contract FewV4ShellHookTest is Test {
         });
 
         vm.expectRevert();
-        hook.setLpPool(curKey, badLpKey);
+        hook.setLpPool(shellKey, badLpKey);
     }
 
     // ---------------------------------------------------------------------
@@ -914,7 +914,7 @@ contract FewV4ShellHookTest is Test {
         _addLpLiquidity(LP_LIQUIDITY);
 
         // Quote exact-input: swap SWAP_AMOUNT/100 of token0 for token1.
-        uint256 amountUnspecified = hook.quote(true, -int256(SWAP_AMOUNT / 100), curKey.toId());
+        uint256 amountUnspecified = hook.quote(true, -int256(SWAP_AMOUNT / 100), shellKey.toId());
 
         // exact-input: unspecified side is output (amountOut)
         assertEq(amountUnspecified, amountUnspecified, "amountUnspecified");
@@ -928,7 +928,7 @@ contract FewV4ShellHookTest is Test {
 
         // Quote exact-output: want SWAP_AMOUNT/100 of token1.
         uint256 exactOut = SWAP_AMOUNT / 100;
-        uint256 amountUnspecified = hook.quote(true, int256(exactOut), curKey.toId());
+        uint256 amountUnspecified = hook.quote(true, int256(exactOut), shellKey.toId());
 
         // exact-output: unspecified side is input (amountIn)
         assertTrue(amountUnspecified > 0, "amountUnspecified > 0");
@@ -939,7 +939,7 @@ contract FewV4ShellHookTest is Test {
         _addCurLiquidity(1e18);
 
         vm.expectRevert(FewV4ShellHook.LpRouteUnavailable.selector);
-        hook.quote(true, -int256(SWAP_AMOUNT), curKey.toId());
+        hook.quote(true, -int256(SWAP_AMOUNT), shellKey.toId());
     }
 
     // ---------------------------------------------------------------------
@@ -951,7 +951,7 @@ contract FewV4ShellHookTest is Test {
         manager.initialize(lpKey, _lpPriceForBetterZeroForOne());
         _addLpLiquidity(LP_LIQUIDITY);
 
-        (uint256 amount0, uint256 amount1) = hook.pseudoTotalValueLocked(curKey.toId());
+        (uint256 amount0, uint256 amount1) = hook.pseudoTotalValueLocked(shellKey.toId());
 
         // Both amounts should be positive.
         assertGt(amount0, 0, "amount0 > 0");
@@ -974,7 +974,7 @@ contract FewV4ShellHookTest is Test {
 
     function test_pseudoTvl_returnsZeroWhenLpNotInitialized() public {
         // lp pool not initialized → route unavailable → returns (0, 0).
-        (uint256 amount0, uint256 amount1) = hook.pseudoTotalValueLocked(curKey.toId());
+        (uint256 amount0, uint256 amount1) = hook.pseudoTotalValueLocked(shellKey.toId());
         assertEq(amount0, 0, "amount0 == 0");
         assertEq(amount1, 0, "amount1 == 0");
     }
@@ -983,13 +983,13 @@ contract FewV4ShellHookTest is Test {
         // lp pool initialized but no liquidity → route available=false → returns (0, 0).
         manager.initialize(lpKey, _lpPriceForBetterZeroForOne());
 
-        (uint256 amount0, uint256 amount1) = hook.pseudoTotalValueLocked(curKey.toId());
+        (uint256 amount0, uint256 amount1) = hook.pseudoTotalValueLocked(shellKey.toId());
         assertEq(amount0, 0, "amount0 == 0");
         assertEq(amount1, 0, "amount1 == 0");
     }
 
-    function test_pseudoTvl_revertsForUninitializedCurPool() public {
-        // Construct a curPool key that was never initialized through the hook.
+    function test_pseudoTvl_revertsForUninitializedShellPool() public {
+        // Construct a shellPool key that was never initialized through the hook.
         PoolKey memory uninitKey = PoolKey({
             currency0: currency0,
             currency1: currency1,
@@ -998,7 +998,7 @@ contract FewV4ShellHookTest is Test {
             hooks: IHooks(address(hook))
         });
 
-        vm.expectRevert(abi.encodeWithSelector(FewV4ShellHook.CurPoolNotInitialized.selector, uninitKey.toId()));
+        vm.expectRevert(abi.encodeWithSelector(FewV4ShellHook.ShellPoolNotInitialized.selector, uninitKey.toId()));
         hook.pseudoTotalValueLocked(uninitKey.toId());
     }
 
@@ -1006,12 +1006,12 @@ contract FewV4ShellHookTest is Test {
         manager.initialize(lpKey, _lpPriceForBetterZeroForOne());
         _addLpLiquidity(LP_LIQUIDITY);
 
-        (uint256 amount0Before, uint256 amount1Before) = hook.pseudoTotalValueLocked(curKey.toId());
+        (uint256 amount0Before, uint256 amount1Before) = hook.pseudoTotalValueLocked(shellKey.toId());
 
         // Swap moves the lp pool price, so virtual amounts change.
         _swapAsUser(true, -int256(SWAP_AMOUNT));
 
-        (uint256 amount0After, uint256 amount1After) = hook.pseudoTotalValueLocked(curKey.toId());
+        (uint256 amount0After, uint256 amount1After) = hook.pseudoTotalValueLocked(shellKey.toId());
 
         // After zeroForOne (selling token0, buying token1), price decreases (more token0 per token1).
         // virtual0 = L * 2^96 / sqrtPrice → increases as price drops
@@ -1036,13 +1036,13 @@ contract FewV4ShellHookTest is Test {
         return out;
     }
 
-    /// @dev Asserts that a swap on curKey reverts with the given inner error selector, unwrapping
+    /// @dev Asserts that a swap on shellKey reverts with the given inner error selector, unwrapping
     ///      the v4-core ERC-7751 WrappedError envelope.
     function _expectLpRevertOnSwap(bool zeroForOne, int256 amountSpecified, bytes4 innerSelector) internal {
         PoolSwapTest.TestSettings memory settings =
             PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
         try swapRouter.swap(
-            curKey,
+            shellKey,
             SwapParams({
                 zeroForOne: zeroForOne,
                 amountSpecified: amountSpecified,
@@ -1065,7 +1065,7 @@ contract FewV4ShellHookTest is Test {
         ModifyLiquidityParams memory params = ModifyLiquidityParams({
             tickLower: -120, tickUpper: 120, liquidityDelta: int128(int256(liquidityAmount)), salt: 0
         });
-        liquidityRouter.modifyLiquidity(curKey, params, bytes(""));
+        liquidityRouter.modifyLiquidity(shellKey, params, bytes(""));
     }
 
     function _addLpLiquidity(uint256 liquidityAmount) internal {
@@ -1099,7 +1099,7 @@ contract FewV4ShellHookTest is Test {
         IERC20(lpToken0).transfer(address(manager), amount0 * 100);
         IERC20(lpToken1).transfer(address(manager), amount1 * 100);
 
-        // Use a tick range that contains the lp pool's current tick.
+        // Use a tick range that contains the lp pool's shellrent tick.
         // SQRT_PRICE_2_1 -> tick 6931, SQRT_PRICE_1_2 -> tick -6931, SQRT_PRICE_1_1 -> tick 0.
         // We use a range centered on 0 with enough width to cover all test prices.
         // Use tick spacing multiples (TICK_SPACING=10).
@@ -1158,7 +1158,7 @@ contract FewV4ShellHookTest is Test {
 
         vm.prank(USER);
         return swapRouter.swap(
-            curKey,
+            shellKey,
             SwapParams({
                 zeroForOne: zeroForOne,
                 amountSpecified: amountSpecified,
