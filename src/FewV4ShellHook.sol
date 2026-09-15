@@ -104,13 +104,11 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
         bool set;
     }
 
-    constructor(
-        IPoolManager _poolManager,
-        IFewFactory _fewFactory,
-        IWETH9 _weth,
-        IV4Quoter _v4Quoter,
-        address _owner
-    ) BaseHook(_poolManager) LpSettlement(_weth) LpOwner(_owner) {
+    constructor(IPoolManager _poolManager, IFewFactory _fewFactory, IWETH9 _weth, IV4Quoter _v4Quoter, address _owner)
+        BaseHook(_poolManager)
+        LpSettlement(_weth)
+        LpOwner(_owner)
+    {
         if (
             address(_poolManager) == address(0) || address(_fewFactory) == address(0) || address(_weth) == address(0)
                 || address(_v4Quoter) == address(0)
@@ -239,12 +237,7 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
     ///         order. Reads the lp pool's sqrtPriceX96 and active liquidity and computes virtual amounts.
     /// @dev This is an active-liquidity depth proxy, not accounting TVL. Returns (0, 0) if the lp pool
     ///      is unavailable, uninitialized, or has no active liquidity.
-    function pseudoTotalValueLocked(PoolId poolId)
-        external
-        view
-        override
-        returns (uint256 amount0, uint256 amount1)
-    {
+    function pseudoTotalValueLocked(PoolId poolId) external view override returns (uint256 amount0, uint256 amount1) {
         PoolKey memory shellKey = initedPools[poolId];
         if (address(shellKey.hooks) == address(0)) revert ShellPoolNotInitialized(poolId);
 

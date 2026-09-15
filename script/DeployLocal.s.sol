@@ -96,9 +96,14 @@ contract DeployLocal is Script {
         address create2Deployer = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
         MockWETH9 weth = new MockWETH9();
         V4Quoter v4Quoter = new V4Quoter(IPoolManager(address(manager)));
-        uint160 flags = uint160(Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.BEFORE_INITIALIZE_FLAG);
+        uint160 flags =
+            uint160(Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.BEFORE_INITIALIZE_FLAG);
         bytes memory constructorArgs = abi.encode(
-            IPoolManager(address(manager)), IFewFactory(address(factory)), IWETH9(address(weth)), IV4Quoter(address(v4Quoter)), address(this)
+            IPoolManager(address(manager)),
+            IFewFactory(address(factory)),
+            IWETH9(address(weth)),
+            IV4Quoter(address(v4Quoter)),
+            address(this)
         );
         (address expectedHook, bytes32 salt) =
             HookMiner.find(create2Deployer, flags, type(FewV4ShellHook).creationCode, constructorArgs);

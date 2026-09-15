@@ -22,10 +22,7 @@ contract HookDeployer {
     /// @dev Deploys the hook via CREATE2. The hook owner is embedded in initCode
     ///      (as a constructor argument), so the owner is set at construction time.
     ///      Returns the hook address.
-    function deployHook(bytes32 salt, bytes memory initCode)
-        external
-        returns (address hookAddr)
-    {
+    function deployHook(bytes32 salt, bytes memory initCode) external returns (address hookAddr) {
         hookAddr = create2(salt, initCode);
         require(hookAddr != address(0), "CREATE2 failed");
     }
