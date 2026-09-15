@@ -183,10 +183,7 @@ contract TestSepolia is Script {
         fewToken.approve(address(liquidityRouter), type(uint256).max);
         {
             ModifyLiquidityParams memory params = ModifyLiquidityParams({
-                tickLower: -887220,
-                tickUpper: 887220,
-                liquidityDelta: int128(int256(LIQUIDITY)),
-                salt: 0
+                tickLower: -887220, tickUpper: 887220, liquidityDelta: int128(int256(LIQUIDITY)), salt: 0
             });
             liquidityRouter.modifyLiquidity(lpKey, params, bytes(""));
         }
@@ -198,10 +195,7 @@ contract TestSepolia is Script {
         token.approve(address(liquidityRouter), type(uint256).max);
         {
             ModifyLiquidityParams memory params = ModifyLiquidityParams({
-                tickLower: -887220,
-                tickUpper: 887220,
-                liquidityDelta: int128(int256(LIQUIDITY)),
-                salt: 0
+                tickLower: -887220, tickUpper: 887220, liquidityDelta: int128(int256(LIQUIDITY)), salt: 0
             });
             // Send generous ETH; PoolModifyLiquidityTest refunds excess
             liquidityRouter.modifyLiquidity{value: LIQUIDITY * 2}(shellKey, params, bytes(""));
