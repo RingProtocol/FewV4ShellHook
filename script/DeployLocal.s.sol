@@ -98,7 +98,7 @@ contract DeployLocal is Script {
         V4Quoter v4Quoter = new V4Quoter(IPoolManager(address(manager)));
         uint160 flags = uint160(Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.BEFORE_INITIALIZE_FLAG);
         bytes memory constructorArgs = abi.encode(
-            IPoolManager(address(manager)), IFewFactory(address(factory)), IWETH9(address(weth)), IV4Quoter(address(v4Quoter))
+            IPoolManager(address(manager)), IFewFactory(address(factory)), IWETH9(address(weth)), IV4Quoter(address(v4Quoter)), address(this)
         );
         (address expectedHook, bytes32 salt) =
             HookMiner.find(create2Deployer, flags, type(FewV4ShellHook).creationCode, constructorArgs);
@@ -106,7 +106,8 @@ contract DeployLocal is Script {
             IPoolManager(address(manager)),
             IFewFactory(address(factory)),
             IWETH9(address(weth)),
-            IV4Quoter(address(v4Quoter))
+            IV4Quoter(address(v4Quoter)),
+            address(this)
         );
         require(address(hook) == expectedHook, "hook address mismatch");
         console2.log("FewV4ShellHook:", address(hook));

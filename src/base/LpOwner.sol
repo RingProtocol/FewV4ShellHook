@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 pragma solidity 0.8.26;
 
-/// @notice Minimal single-owner access control. The owner is set to `msg.sender` at construction
+/// @notice Minimal single-owner access control. The owner is set to `_owner` at construction
 ///         and can be transferred via `transferOwner`.
 abstract contract LpOwner {
     error NotOwner(address caller, address owner);
@@ -16,8 +16,9 @@ abstract contract LpOwner {
         _;
     }
 
-    constructor() {
-        owner = msg.sender;
+    constructor(address _owner) {
+        if (_owner == address(0)) revert ZeroAddress();
+        owner = _owner;
     }
 
     /// @notice Transfers ownership to `newOwner`. The new owner must not be the zero address.

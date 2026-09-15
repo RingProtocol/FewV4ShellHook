@@ -13,25 +13,21 @@ import {FewV4ShellHook} from "../src/FewV4ShellHook.sol";
 import {IFewFactory} from "../src/interfaces/external/IFewFactory.sol";
 import {IWETH9} from "v4-periphery/src/interfaces/external/IWETH9.sol";
 
-/// @notice Helper contract that deploys FewV4ShellHook via CREATE2 from itself (so it becomes
-///         the hook owner), then immediately transfers ownership to the desired address.
-///         Deployed via regular CREATE so its address is deterministic from the deployer's nonce.
+/// @notice Helper contract that deploys FewV4ShellHook via CREATE2 from itself.
+///         The hook owner is set at construction time via the constructor parameter,
+///         so no transferOwner step is needed. The CREATE2 address is bound to the
+///         owner address, making front-running at the same address impossible — an
+///         attacker using a different owner gets a different address.
 contract HookDeployer {
-    /// @dev Deploys the hook via CREATE2 and transfers ownership to `newOwner`.
+    /// @dev Deploys the hook via CREATE2. The hook owner is embedded in initCode
+    ///      (as a constructor argument), so the owner is set at construction time.
     ///      Returns the hook address.
-    function deployHook(bytes32 salt, bytes memory initCode, address newOwner)
+    function deployHook(bytes32 salt, bytes memory initCode)
         external
         returns (address hookAddr)
     {
         hookAddr = create2(salt, initCode);
         require(hookAddr != address(0), "CREATE2 failed");
-
-        // The deployer (this contract) is now the hook owner. Transfer it.
-        FewV4ShellHook hook = FewV4ShellHook(payable(hookAddr));
-        hook.transferOwner(newOwner);
-
-        // Self-destruct to clean up (optional, saves gas for future deployments).
-        // Not using selfdestruct in modern Solidity; just leave it.
     }
 
     /// @dev Internal CREATE2 deployment.
@@ -44,11 +40,11 @@ contract HookDeployer {
     }
 }
 
-/// @notice Deploys FewV4ShellHook via a HookDeployer helper, so the hook owner can be
-///         transferred to HOOK_OWNER immediately after deployment.
+/// @notice Deploys FewV4ShellHook via a HookDeployer helper with HOOK_OWNER embedded
+///         in the hook constructor arguments.
 ///
 /// Required env:
-///   HOOK_OWNER  - the address to transfer ownership to
+///   HOOK_OWNER  - the hook owner set during construction
 ///
 /// Optional env (defaults are Ethereum mainnet):
 ///   V4_POOL_MANAGER, FEW_FACTORY, WETH9, V4_QUOTER
@@ -72,7 +68,8 @@ contract DeployFewV4ShellHookWithOwner is Script {
             IPoolManager(poolManagerAddress),
             IFewFactory(factoryAddress),
             IWETH9(wethAddress),
-            IV4Quoter(v4QuoterAddress)
+            IV4Quoter(v4QuoterAddress),
+            newOwner
         );
         bytes memory initCode = abi.encodePacked(type(FewV4ShellHook).creationCode, constructorArgs);
         uint160 flags = _flags();
@@ -86,10 +83,10 @@ contract DeployFewV4ShellHookWithOwner is Script {
         (address expectedHook, bytes32 salt) =
             HookMiner.find(deployerAddr, flags, type(FewV4ShellHook).creationCode, constructorArgs);
 
-        console2.log("=== FewV4ShellHook deployment (with owner transfer) ===");
+        console2.log("=== FewV4ShellHook deployment (owner in constructor) ===");
         console2.log("Deployer:      ", deployer);
         console2.log("HookDeployer:  ", deployerAddr);
-        console2.log("NewOwner:      ", newOwner);
+        console2.log("Owner:         ", newOwner);
         console2.log("Expected hook: ", expectedHook);
         console2.log("Salt:");
         console2.logBytes32(salt);
@@ -100,8 +97,8 @@ contract DeployFewV4ShellHookWithOwner is Script {
         HookDeployer deployerHelper = new HookDeployer();
         require(address(deployerHelper) == deployerAddr, "deployer address mismatch");
 
-        // 2. Use the HookDeployer to deploy the hook and transfer ownership.
-        address hookAddr = deployerHelper.deployHook(salt, initCode, newOwner);
+        // 2. Use the HookDeployer to deploy the hook. Owner is set at construction time.
+        address hookAddr = deployerHelper.deployHook(salt, initCode);
         require(hookAddr == expectedHook, "hook address mismatch");
 
         FewV4ShellHook hook = FewV4ShellHook(payable(hookAddr));
@@ -111,11 +108,11 @@ contract DeployFewV4ShellHookWithOwner is Script {
         require(address(hook.fewFactory()) == factoryAddress, "deployed factory mismatch");
         require(address(hook.weth()) == wethAddress, "deployed weth mismatch");
         require(address(hook.v4Quoter()) == v4QuoterAddress, "deployed v4Quoter mismatch");
-        require(hook.owner() == newOwner, "owner should be newOwner after transfer");
+        require(hook.owner() == newOwner, "owner should be newOwner");
 
         vm.stopBroadcast();
 
-        console2.log("=== Deployment & ownership transfer verified ===");
+        console2.log("=== Deployment verified (owner set at construction) ===");
         console2.log("Hook:        ", address(hook));
         console2.log("poolManager: ", poolManagerAddress);
         console2.log("fewFactory:  ", factoryAddress);

@@ -100,7 +100,8 @@ contract DeployLocalEth is Script {
             IPoolManager(address(manager)),
             IFewFactory(address(factory)),
             IWETH9(address(weth)),
-            IV4Quoter(address(v4Quoter))
+            IV4Quoter(address(v4Quoter)),
+            address(this)
         );
         (address expectedHook, bytes32 salt) =
             HookMiner.find(create2Deployer, flags, type(FewV4ShellHook).creationCode, constructorArgs);
@@ -108,7 +109,8 @@ contract DeployLocalEth is Script {
             IPoolManager(address(manager)),
             IFewFactory(address(factory)),
             IWETH9(address(weth)),
-            IV4Quoter(address(v4Quoter))
+            IV4Quoter(address(v4Quoter)),
+            address(this)
         );
         require(address(hook) == expectedHook, "hook address mismatch");
         console2.log("FewV4ShellHook:", address(hook));
@@ -151,7 +153,7 @@ contract DeployLocalEth is Script {
 
         // Note: We rely on FewFactory auto-inference for the lp route (like DeployLocal.s.sol).
         // The hook derives the lp pool from getWrappedToken(WETH) and getWrappedToken(tokenB),
-        // reusing the shell pool's fee and tickSpacing. No setLpPool needed (owner is CREATE2 deployer).
+        // reusing the shell pool's fee and tickSpacing. No setLpPool needed (owner is constructor argument).
 
         // ------------------------------------------------------------------
         // 9. Add shell pool liquidity with native ETH
