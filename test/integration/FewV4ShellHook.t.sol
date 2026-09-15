@@ -114,9 +114,11 @@ contract FewV4ShellHookTest is Test {
         tokenB.mint(address(manager), 1_000_000e18);
 
         // Deploy the hook at a mined address matching permission flags.
-        uint160 flags = uint160(Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.BEFORE_INITIALIZE_FLAG);
-        bytes memory constructorArgs =
-            abi.encode(manager, IFewFactory(address(factory)), IWETH9(address(weth)), IV4Quoter(address(v4Quoter)), address(this));
+        uint160 flags =
+            uint160(Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.BEFORE_INITIALIZE_FLAG);
+        bytes memory constructorArgs = abi.encode(
+            manager, IFewFactory(address(factory)), IWETH9(address(weth)), IV4Quoter(address(v4Quoter)), address(this)
+        );
         (address minedAddr, bytes32 salt) =
             HookMiner.find(address(this), flags, type(FewV4ShellHook).creationCode, constructorArgs);
         hook = new FewV4ShellHook{salt: salt}(
@@ -194,33 +196,43 @@ contract FewV4ShellHookTest is Test {
         // FewFactory(0), WETH(0), and owner(0) are blocked by the constructor.
         // We can't test PoolManager(0) directly because BaseHook's validateHookAddress
         // runs first and requires a specific address pattern.
-        uint160 flags = uint160(Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.BEFORE_INITIALIZE_FLAG);
+        uint160 flags =
+            uint160(Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.BEFORE_INITIALIZE_FLAG);
 
         // FewFactory(0)
-        bytes memory constructorArgsA =
-            abi.encode(manager, IFewFactory(address(0)), IWETH9(address(weth)), IV4Quoter(address(v4Quoter)), address(this));
+        bytes memory constructorArgsA = abi.encode(
+            manager, IFewFactory(address(0)), IWETH9(address(weth)), IV4Quoter(address(v4Quoter)), address(this)
+        );
         (address minedAddrA, bytes32 saltA) =
             HookMiner.find(address(this), flags, type(FewV4ShellHook).creationCode, constructorArgsA);
         vm.expectRevert(LpOwner.ZeroAddress.selector);
-        new FewV4ShellHook{salt: saltA}(manager, IFewFactory(address(0)), IWETH9(address(weth)), IV4Quoter(address(v4Quoter)), address(this));
+        new FewV4ShellHook{salt: saltA}(
+            manager, IFewFactory(address(0)), IWETH9(address(weth)), IV4Quoter(address(v4Quoter)), address(this)
+        );
         minedAddrA;
 
         // WETH(0)
-        bytes memory constructorArgsB =
-            abi.encode(manager, IFewFactory(address(factory)), IWETH9(address(0)), IV4Quoter(address(v4Quoter)), address(this));
+        bytes memory constructorArgsB = abi.encode(
+            manager, IFewFactory(address(factory)), IWETH9(address(0)), IV4Quoter(address(v4Quoter)), address(this)
+        );
         (address minedAddrB, bytes32 saltB) =
             HookMiner.find(address(this), flags, type(FewV4ShellHook).creationCode, constructorArgsB);
         vm.expectRevert(LpOwner.ZeroAddress.selector);
-        new FewV4ShellHook{salt: saltB}(manager, IFewFactory(address(factory)), IWETH9(address(0)), IV4Quoter(address(v4Quoter)), address(this));
+        new FewV4ShellHook{salt: saltB}(
+            manager, IFewFactory(address(factory)), IWETH9(address(0)), IV4Quoter(address(v4Quoter)), address(this)
+        );
         minedAddrB;
 
         // Owner(0)
-        bytes memory constructorArgsC =
-            abi.encode(manager, IFewFactory(address(factory)), IWETH9(address(weth)), IV4Quoter(address(v4Quoter)), address(0));
+        bytes memory constructorArgsC = abi.encode(
+            manager, IFewFactory(address(factory)), IWETH9(address(weth)), IV4Quoter(address(v4Quoter)), address(0)
+        );
         (address minedAddrC, bytes32 saltC) =
             HookMiner.find(address(this), flags, type(FewV4ShellHook).creationCode, constructorArgsC);
         vm.expectRevert(LpOwner.ZeroAddress.selector);
-        new FewV4ShellHook{salt: saltC}(manager, IFewFactory(address(factory)), IWETH9(address(weth)), IV4Quoter(address(v4Quoter)), address(0));
+        new FewV4ShellHook{salt: saltC}(
+            manager, IFewFactory(address(factory)), IWETH9(address(weth)), IV4Quoter(address(v4Quoter)), address(0)
+        );
         minedAddrC;
     }
 
@@ -964,9 +976,7 @@ contract FewV4ShellHookTest is Test {
         MockERC20(inputToken).burn(address(manager), pmBalance);
 
         vm.expectRevert(
-            abi.encodeWithSelector(
-                FewV4ShellHook.LpInsufficientInventory.selector, inputToken, 0, SWAP_AMOUNT / 100
-            )
+            abi.encodeWithSelector(FewV4ShellHook.LpInsufficientInventory.selector, inputToken, 0, SWAP_AMOUNT / 100)
         );
         hook.quote(true, -int256(SWAP_AMOUNT / 100), shellKey.toId());
     }
@@ -1043,17 +1053,13 @@ contract FewV4ShellHookTest is Test {
 
         // Exact-input (negative amountSpecified).
         vm.expectRevert(
-            abi.encodeWithSelector(
-                FewV4ShellHook.QuoteAmountTooLarge.selector, tooLarge, type(uint128).max
-            )
+            abi.encodeWithSelector(FewV4ShellHook.QuoteAmountTooLarge.selector, tooLarge, type(uint128).max)
         );
         hook.quote(true, -int256(tooLarge), shellKey.toId());
 
         // Exact-output (positive amountSpecified).
         vm.expectRevert(
-            abi.encodeWithSelector(
-                FewV4ShellHook.QuoteAmountTooLarge.selector, tooLarge, type(uint128).max
-            )
+            abi.encodeWithSelector(FewV4ShellHook.QuoteAmountTooLarge.selector, tooLarge, type(uint128).max)
         );
         hook.quote(true, int256(tooLarge), shellKey.toId());
     }
@@ -1159,9 +1165,7 @@ contract FewV4ShellHookTest is Test {
         // virtual0 = L * 2^96 / sqrtPrice → increases as price drops
         // virtual1 = L * sqrtPrice / 2^96 → decreases as price drops
         // But orderAligned may invert; just check they changed.
-        assertTrue(
-            amount0After != amount0Before || amount1After != amount1Before, "pseudo TVL changed after swap"
-        );
+        assertTrue(amount0After != amount0Before || amount1After != amount1Before, "pseudo TVL changed after swap");
     }
 
     // ---------------------------------------------------------------------
