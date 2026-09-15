@@ -1,10 +1,10 @@
 # FewV4ShellHook
 
-`FewV4ShellHook` exposes an origin-token Uniswap v4 shell pool while executing each swap against one constructor-approved, hookless FewToken v4 pool.
+`FewV4ShellHook` exposes an origin-token Uniswap v4 `shellPool` while executing each swap against a configured or factory-derived FewToken `lpPool`.
 
-The outer pool is never swapped against: the Hook wraps the origin input, executes the inner FewToken swap, unwraps the output, and replaces the outer swap with a `beforeSwap` return delta. Exact input and exact output must fill completely or the whole transaction reverts.
+The `shellPool` is never used as the swap execution venue: the Hook wraps the origin input, executes the swap against the `lpPool`, unwraps the output, and replaces the `shellPool` swap with a `beforeSwap` return delta. Exact input and exact output must fill completely or the whole transaction reverts.
 
-Only the immutable `owner` may add outer-pool liquidity, either directly or through the canonical v4 `PositionManager` (the path the Uniswap interface uses, resolved against the position's ERC-721 holder). That liquidity is inert — it never trades and earns no fee — and exists so the owner can seed the physical origin-token inventory the atomic wrap leg takes from the PoolManager. The owner has no other privilege: no upgrade, pause, fee, sweep, or route setter.
+The owner can register or remove an explicit `lpPool` mapping. The route is otherwise derived from the FewFactory. The owner has no upgrade, pause, fee, or sweep privilege; `shellPool` liquidity is handled by the v4 core and the `lpPool` is the actual execution venue.
 
 This package is pre-production. It is not audited, deployed, funded, indexed, or proven to receive Uniswap Labs traffic.
 

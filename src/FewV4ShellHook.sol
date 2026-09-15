@@ -34,7 +34,7 @@ import {LpOwner} from "./base/LpOwner.sol";
 /// @notice A v4 hook that routes all swaps through the fwA/fwB FewToken lp pool (lp pool).
 ///
 /// @dev Core logic:
-///      The hook always routes to lp when available. The cur pool is never used as an execution venue.
+///      The hook always routes to lp when available. The shell pool is never used as an execution venue.
 ///      If lp is unavailable (no route, no liquidity, or insufficient inventory), the swap reverts.
 ///
 ///      Slippage protection relies on v4 native mechanisms:
@@ -46,10 +46,10 @@ import {LpOwner} from "./base/LpOwner.sol";
 ///      Safety model:
 ///      - a single transferable `owner` (set to the deployer at construction) can register explicit
 ///        lp pool mappings; there is no upgrade, fee, pause, or sweep capability;
-///      - anyone may add liquidity to the cur pool;
-///      - routing always goes to lp; the cur pool is never used as a lp venue;
-///      - the lp pool key is taken from the owner-registered `lpPools` mapping (keyed by cur pool PoolId)
-///        when present, otherwise derived purely from the cur pool key and FewFactory state;
+///      - anyone may add liquidity to the shell pool;
+///      - routing always goes to lp; the shell pool is never used as a lp venue;
+///      - the lp pool key is taken from the owner-registered `lpPools` mapping (keyed by shell pool PoolId)
+///        when present, otherwise derived purely from the shell pool key and FewFactory state;
 ///      - wrap/unwrap are strict 1:1 with return-value and balance checks;
 ///      - exact-input and exact-output requests must fill completely or the whole transaction reverts;
 ///      - the PoolManager must already hold enough physical origin input for the atomic flash conversion
@@ -69,10 +69,10 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
     error LpSwapPartialFill(uint256 actual, uint256 expected);
     error LpRouteUnavailable();
     error LpInsufficientInventory(address token, uint256 available, uint256 required);
-    error CurPoolNotInitialized(PoolId curPoolId);
+    error ShellPoolNotInitialized(PoolId shellPoolId);
 
     event LpSwap(
-        PoolId indexed curPoolId,
+        PoolId indexed shellPoolId,
         PoolId indexed lpPoolId,
         address indexed sender,
         bool zeroForOne,
@@ -81,20 +81,20 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
         uint256 amountIn,
         uint256 amountOut
     );
-    event LpPoolSet(PoolId indexed curPoolId, PoolKey lpPoolKey);
-    event LpPoolRemoved(PoolId indexed curPoolId);
+    event LpPoolSet(PoolId indexed shellPoolId, PoolKey lpPoolKey);
+    event LpPoolRemoved(PoolId indexed shellPoolId);
 
     IFewFactory public immutable fewFactory;
     IWETH9 public immutable weth;
     IV4Quoter public immutable v4Quoter;
 
-    /// @notice Owner-registered explicit lp pool definitions, keyed by the cur pool's PoolId.
+    /// @notice Owner-registered explicit lp pool definitions, keyed by the shell pool's PoolId.
     mapping(PoolId => LpPool) public lpPools;
 
-    /// @notice Records the cur pool keys that have been initialized through this hook, keyed by PoolId.
+    /// @notice Records the shell pool keys that have been initialized through this hook, keyed by PoolId.
     mapping(PoolId => PoolKey) public initedPools;
 
-    /// @notice Enumerable list of all cur pool PoolIds that have been initialized through this hook.
+    /// @notice Enumerable list of all shell pool PoolIds that have been initialized through this hook.
     PoolId[] public initedPoolIds;
 
     struct LpPool {
@@ -118,29 +118,29 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
         v4Quoter = _v4Quoter;
     }
 
-    /// @notice Registers an explicit lp pool for the given cur pool. The `lpPoolKey`'s
-    ///         currency0/currency1 must be FewToken wrappers for curPoolKey.currency0/currency1
+    /// @notice Registers an explicit lp pool for the given shell pool. The `lpPoolKey`'s
+    ///         currency0/currency1 must be FewToken wrappers for shellPoolKey.currency0/currency1
     ///         respectively (in either order). The `lpPoolKey.hooks` is preserved, so a hooked lp
     ///         pool may be registered. Passing an empty `lpPoolKey` (currency0 == address(0))
     ///         removes the registration, causing the hook to fall back to FewFactory auto-inference.
-    function setLpPool(PoolKey calldata curPoolKey, PoolKey calldata lpPoolKey) external onlyOwner {
-        PoolId curPoolId = curPoolKey.toId();
-        if (address(initedPools[curPoolId].hooks) == address(0)) revert CurPoolNotInitialized(curPoolId);
+    function setLpPool(PoolKey calldata shellPoolKey, PoolKey calldata lpPoolKey) external onlyOwner {
+        PoolId shellPoolId = shellPoolKey.toId();
+        if (address(initedPools[shellPoolId].hooks) == address(0)) revert ShellPoolNotInitialized(shellPoolId);
 
         // Empty lpPoolKey (currency0 == address(0)) means removal.
         if (Currency.unwrap(lpPoolKey.currency0) == address(0)) {
-            if (!lpPools[curPoolId].set) return;
-            delete lpPools[curPoolId];
-            emit LpPoolRemoved(curPoolId);
+            if (!lpPools[shellPoolId].set) return;
+            delete lpPools[shellPoolId];
+            emit LpPoolRemoved(shellPoolId);
             return;
         }
 
-        // Validate: lpPoolKey.currency0/currency1 must be FewToken wrappers for curPoolKey's
+        // Validate: lpPoolKey.currency0/currency1 must be FewToken wrappers for shellPoolKey's
         // currencies (in either order). Native ETH (address(0)) maps to WETH for comparison.
-        address curLookup0 = Currency.unwrap(curPoolKey.currency0);
-        address curLookup1 = Currency.unwrap(curPoolKey.currency1);
-        curLookup0 = curLookup0 == address(0) ? address(weth) : curLookup0;
-        curLookup1 = curLookup1 == address(0) ? address(weth) : curLookup1;
+        address shellLookup0 = Currency.unwrap(shellPoolKey.currency0);
+        address shellLookup1 = Currency.unwrap(shellPoolKey.currency1);
+        shellLookup0 = shellLookup0 == address(0) ? address(weth) : shellLookup0;
+        shellLookup1 = shellLookup1 == address(0) ? address(weth) : shellLookup1;
         address few0 = Currency.unwrap(lpPoolKey.currency0);
         address few1 = Currency.unwrap(lpPoolKey.currency1);
         if (few0.code.length == 0 || few1.code.length == 0) revert ZeroAddress();
@@ -148,16 +148,16 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
         address underlying0 = IFewWrappedToken(few0).token();
         address underlying1 = IFewWrappedToken(few1).token();
         bool orderAligned;
-        if (underlying0 == curLookup0 && underlying1 == curLookup1) {
+        if (underlying0 == shellLookup0 && underlying1 == shellLookup1) {
             orderAligned = true;
-        } else if (underlying0 == curLookup1 && underlying1 == curLookup0) {
+        } else if (underlying0 == shellLookup1 && underlying1 == shellLookup0) {
             orderAligned = false;
         } else {
-            revert WrapperUnderlyingMismatch(few0, curLookup0, underlying0);
+            revert WrapperUnderlyingMismatch(few0, shellLookup0, underlying0);
         }
 
-        lpPools[curPoolId] = LpPool({lpPoolKey: lpPoolKey, orderAligned: orderAligned, set: true});
-        emit LpPoolSet(curPoolId, lpPoolKey);
+        lpPools[shellPoolId] = LpPool({lpPoolKey: lpPoolKey, orderAligned: orderAligned, set: true});
+        emit LpPoolSet(shellPoolId, lpPoolKey);
     }
 
     // ---------------------------------------------------------------------
@@ -173,10 +173,10 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
         override
         returns (uint256 amountUnspecified)
     {
-        PoolKey memory curKey = initedPools[poolId];
-        if (address(curKey.hooks) == address(0)) revert CurPoolNotInitialized(poolId);
+        PoolKey memory shellKey = initedPools[poolId];
+        if (address(shellKey.hooks) == address(0)) revert ShellPoolNotInitialized(poolId);
 
-        LpRouteLib.LpRoute memory route = _deriveLpRoute(curKey);
+        LpRouteLib.LpRoute memory route = _deriveLpRoute(shellKey);
         if (!route.available) revert LpRouteUnavailable();
 
         bool lpZeroForOne = zeroToOne == route.orderAligned;
@@ -199,7 +199,7 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
         }
     }
 
-    /// @notice Returns a liquidity-depth proxy for the cur pool, expressed in the cur pool's currency
+    /// @notice Returns a liquidity-depth proxy for the shell pool, expressed in the shell pool's currency
     ///         order. Reads the lp pool's sqrtPriceX96 and active liquidity and computes virtual amounts.
     /// @dev This is an active-liquidity depth proxy, not accounting TVL. Returns (0, 0) if the lp pool
     ///      is unavailable, uninitialized, or has no active liquidity.
@@ -209,10 +209,10 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
         override
         returns (uint256 amount0, uint256 amount1)
     {
-        PoolKey memory curKey = initedPools[poolId];
-        if (address(curKey.hooks) == address(0)) revert CurPoolNotInitialized(poolId);
+        PoolKey memory shellKey = initedPools[poolId];
+        if (address(shellKey.hooks) == address(0)) revert ShellPoolNotInitialized(poolId);
 
-        LpRouteLib.LpRoute memory route = _deriveLpRoute(curKey);
+        LpRouteLib.LpRoute memory route = _deriveLpRoute(shellKey);
         if (!route.available) return (0, 0);
 
         (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(route.lpPoolId);
@@ -242,7 +242,7 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
         return IHooks.beforeInitialize.selector;
     }
 
-    /// @notice Returns the number of cur pools that have been initialized through this hook.
+    /// @notice Returns the number of shell pools that have been initialized through this hook.
     function initedPoolCount() external view returns (uint256) {
         return initedPoolIds.length;
     }
@@ -258,7 +258,7 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
         nonReentrant
         returns (bytes4, BeforeSwapDelta, uint24)
     {
-        PoolId curPoolId = key.toId();
+        PoolId shellPoolId = key.toId();
 
         // lp is the only execution venue. If no route is available, revert.
         LpRouteLib.LpRoute memory route = _deriveLpRoute(key);
@@ -297,7 +297,7 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
         int128 unspecifiedDelta = params.amountSpecified < 0 ? -amountOut.toInt128() : amountIn.toInt128();
 
         emit LpSwap(
-            curPoolId, route.lpPoolId, sender, params.zeroForOne, true, params.amountSpecified, amountIn, amountOut
+            shellPoolId, route.lpPoolId, sender, params.zeroForOne, true, params.amountSpecified, amountIn, amountOut
         );
 
         return (IHooks.beforeSwap.selector, toBeforeSwapDelta(specifiedDelta, unspecifiedDelta), 0);
@@ -323,7 +323,7 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
         if (registered.set) {
             PoolKey memory lpKey = registered.lpPoolKey;
             bool orderAligned = registered.orderAligned;
-            // few0/few1 in the route always wrap cur token0/token1 respectively.
+            // few0/few1 in the route always wrap shell token0/token1 respectively.
             address regFew0 = Currency.unwrap(orderAligned ? lpKey.currency0 : lpKey.currency1);
             address regFew1 = Currency.unwrap(orderAligned ? lpKey.currency1 : lpKey.currency0);
             return LpRouteLib.buildRoute(
@@ -331,7 +331,7 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
             );
         }
 
-        // 2. Fall back to FewFactory auto-inference, reusing the cur pool's fee and tick spacing.
+        // 2. Fall back to FewFactory auto-inference, reusing the shell pool's fee and tick spacing.
         address few0 = fewFactory.getWrappedToken(lookup0);
         address few1 = fewFactory.getWrappedToken(lookup1);
         return LpRouteLib.buildRoute(
@@ -348,9 +348,9 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
         LpRouteLib.LpRoute memory route,
         bool lpZeroForOne,
         int256 amountSpecified,
-        uint160 curPriceLimitX96
+        uint160 shellPriceLimitX96
     ) internal returns (uint256 amountIn, uint256 amountOut) {
-        uint160 lpLimit = LpPriceLib.mapLpPriceLimit(route.orderAligned, lpZeroForOne, curPriceLimitX96);
+        uint160 lpLimit = LpPriceLib.mapLpPriceLimit(route.orderAligned, lpZeroForOne, shellPriceLimitX96);
 
         BalanceDelta delta = poolManager.swap(
             route.lpKeyFromRoute(),

@@ -11,14 +11,14 @@ import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 library LpPriceLib {
     using StateLibrary for IPoolManager;
 
-    /// @dev Maps a cur-pool sqrtPriceLimitX96 into the lp pool's price space. When the lp pool's
-    ///      currency order is reversed relative to cur (`!orderAligned`), the price limit is inverted.
-    function mapLpPriceLimit(bool orderAligned, bool lpZeroForOne, uint160 curLimit) internal pure returns (uint160) {
-        if (orderAligned) return curLimit;
+    /// @dev Maps a shell-pool sqrtPriceLimitX96 into the lp pool's price space. When the lp pool's
+    ///      currency order is reversed relative to shell pool (`!orderAligned`), the price limit is inverted.
+    function mapLpPriceLimit(bool orderAligned, bool lpZeroForOne, uint160 shellLimit) internal pure returns (uint160) {
+        if (orderAligned) return shellLimit;
 
         uint256 mapped = lpZeroForOne
-            ? FullMath.mulDivRoundingUp(1 << 96, 1 << 96, curLimit)
-            : FullMath.mulDiv(1 << 96, 1 << 96, curLimit);
+            ? FullMath.mulDivRoundingUp(1 << 96, 1 << 96, shellLimit)
+            : FullMath.mulDiv(1 << 96, 1 << 96, shellLimit);
 
         if (lpZeroForOne && mapped <= TickMath.MIN_SQRT_PRICE) mapped = TickMath.MIN_SQRT_PRICE + 1;
         if (!lpZeroForOne && mapped >= TickMath.MAX_SQRT_PRICE) mapped = TickMath.MAX_SQRT_PRICE - 1;

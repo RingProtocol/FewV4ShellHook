@@ -30,13 +30,13 @@ abstract contract LpSettlement is DeltaResolver {
         _weth = weth;
     }
 
-    function convertAndSettle(LpRouteLib.LpRoute memory route, bool curZeroForOne, uint256 amountIn, uint256 amountOut)
+    function convertAndSettle(LpRouteLib.LpRoute memory route, bool shellZeroForOne, uint256 amountIn, uint256 amountOut)
         internal
     {
-        Currency input = Currency.wrap(curZeroForOne ? route.token0 : route.token1);
-        Currency output = Currency.wrap(curZeroForOne ? route.token1 : route.token0);
-        address fewIn = curZeroForOne ? route.few0 : route.few1;
-        address fewOut = curZeroForOne ? route.few1 : route.few0;
+        Currency input = Currency.wrap(shellZeroForOne ? route.token0 : route.token1);
+        Currency output = Currency.wrap(shellZeroForOne ? route.token1 : route.token0);
+        address fewIn = shellZeroForOne ? route.few0 : route.few1;
+        address fewOut = shellZeroForOne ? route.few1 : route.few0;
 
         // Input leg: take origin from PoolManager, wrap to fewToken, settle fewToken for lp swap.
         uint256 inputBaseline = input.balanceOfSelf();

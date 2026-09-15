@@ -1,96 +1,96 @@
-# FewToken v4 壳池
+# FewToken v4 Shell Pool
 
-> 更新日期：2026-09-01
-> 状态：review package 已整理；Hook 已部署到 Ethereum mainnet，但未审计，也未确认被 Uniswap routing 自动发现
+> Updated: 2026-09-01
+> Status: The review package has been organized. The Hook is deployed on Ethereum mainnet, but has not been audited and has not been confirmed to be automatically discovered by Uniswap routing.
 
-## 结论
+## Overview
 
-`FewV4ShellHook` 可以把指定的 hookless `fwA/fwB` v4 池暴露为 origin token `A/B` 壳池：用户和通用 v4 router 只看到 `A -> B`，实际成交和 LP fee 全部发生在现有 FewToken v4 池。
+`FewV4ShellHook` exposes a designated hookless FewToken v4 `lpPool` as an origin-token `shellPool` for `A/B`. Users and generic v4 routers see the `A -> B` shell pool, while the actual swap execution and LP fee occur in the existing FewToken v4 `lpPool`.
 
 ```text
-A/B outer pool（零 LP）
+A/B shellPool (tracked by the Hook)
   -> take A from PoolManager
   -> A.wrap() -> fwA
-  -> allowlisted hookless fwA/fwB v4 swap
+  -> allowlisted hookless fwA/fwB v4 lpPool swap
   -> fwB.unwrap() -> B
   -> settle B to PoolManager
 ```
 
-这条路线不需要再复制一份 A/B 流动性，也不会调用现有 `A/fwA`、`B/fwB` 1:1 wrapper 池。wrapper 池放在同一个 PoolManager 后，其 origin token 物理余额可以支持 Hook 在 router 最终付款前的原子 `take`；router 完成结算后，该余额恢复原值。余额不足时 quote 和 swap 都会回滚。
+This design does not require duplicating A/B liquidity and does not use the existing `A/fwA` or `B/fwB` 1:1 wrapper pools for execution. The wrapper pools are held by the same PoolManager, and their physical origin-token balances can support the Hook's atomic `take` before the router's final settlement. After the router completes settlement, the balance returns to its previous value. If the required inventory is unavailable, the quote and swap both revert.
 
-## 固定设计
+## Fixed Design
 
-| 项目 | V1 选择 |
+| Item | V1 choice |
 |---|---|
-| 流动性来源 | constructor allowlist 中唯一、精确的 inner PoolId |
-| inner key | canonical FewToken、hookless、static fee、已初始化且当前有 active liquidity |
-| outer pool | 相同 fee / tick spacing、禁止 donate；只有 owner 能加流动性，且该流动性永不参与成交 |
-| 路由输入 | 不接受 caller 提供的 target、PoolKey 或非空 hookData |
-| 成交 | exact-in 和 exact-out 都必须完整成交，少 1 wei 即整笔回滚 |
-| price limit | V1 只接受 v4 canonical extreme；反序 token 采用严格 reciprocal rounding |
-| wrap / unwrap | 返回值和真实余额变化同时检查，approval 每次归零 |
-| 管理权限 | 无 proxy、pause、fee setter、sweep；owner 是单一可转移 owner，唯一业务权限是注册/移除显式 lp pool，并按合约权限执行其他 owner 操作 |
-| 额外收费 | 无；用户只支付 inner v4 池现有 LP/protocol fee |
-| native ETH | cur pool 可以使用 native ETH；Hook 通过 WETH/FewWETH 完成原子转换 |
+| Liquidity source | One exact `lpPool` PoolId from the constructor-approved route configuration or FewFactory inference |
+| `lpPool` key | Canonical FewToken pair, hookless, static fee, initialized, and currently holding active liquidity |
+| `shellPool` | Uses the shell pool's fee and tick spacing; the shell pool is not the swap execution venue |
+| Route input | The caller cannot provide an arbitrary target, `PoolKey`, or non-empty `hookData` |
+| Execution | Both exact-in and exact-out swaps must fill completely; a one-wei shortfall reverts the entire transaction |
+| Price limit | V1 accepts only the canonical v4 extreme limits; reversed token order uses strict reciprocal rounding |
+| Wrap / unwrap | Return values and actual balance changes are checked; approvals are reset after each operation |
+| Administration | No proxy, pause, fee setter, or sweep capability. The owner is a single transferable owner whose business permission is to register or remove an explicit `lpPool` mapping |
+| Additional fees | None; users only pay the existing LP/protocol fee of the `lpPool` |
+| Native ETH | The `shellPool` can use native ETH; the Hook performs the atomic conversion through WETH/FewWETH |
 
-Hook 权限 mask 是 `0x2088`：
+The Hook permission mask is `0x2088`:
 
 - `beforeInitialize`
 - `beforeSwap`
 - `beforeSwapReturnDelta`
 
-当前版本不启用 `beforeAddLiquidity`；cur pool 的流动性由 v4 core 正常处理，Hook 不在添加流动性路径上做 owner 校验。显式 lp pool 的注册和移除由 `LpOwner.onlyOwner` 保护。
+The current version does not enable `beforeAddLiquidity`. Liquidity for the `shellPool` is handled normally by v4 core, and the Hook does not perform an owner check on the add-liquidity path. Registration and removal of an explicit `lpPool` are protected by `LpOwner.onlyOwner`.
 
-owner 的 outer 流动性是惰性库存：`beforeSwapReturnDelta` 吃掉全部 amount 后 `Pool.swap` 收到 0 并直接返回零 delta，因此 outer 池的头寸永远不参与成交、也拿不到手续费；它的唯一作用是把 origin token 物理余额留在 PoolManager 里，供 wrap 前的原子 `take` 使用。移除流动性不过 hook 校验（`beforeRemoveLiquidity` 保持 false），但 v4 只允许头寸持有者动它。donate 未启用 `beforeDonate`，在 outer 池无流动性时由 v4 core 自身拒绝。
+The shell pool's liquidity acts as inventory rather than as an execution venue. `beforeSwapReturnDelta` consumes the complete requested amount, so `Pool.swap` receives zero and returns a zero delta. Consequently, shell-pool liquidity never participates in the swap and does not earn swap fees. Its purpose is to keep physical origin-token inventory in the PoolManager for the atomic `take` before wrapping. Liquidity removal is not checked by the Hook (`beforeRemoveLiquidity` remains disabled); v4 still restricts removal to the position holder. `beforeDonate` is also disabled, so v4 core rejects donations when the shell pool has no liquidity.
 
-`beforeSwapReturnDelta` 必须为 `true` 才能让 outer pool 完全由 inner pool 结算。因此，这个设计不满足“四个 return-delta flag 全为 false”的免人工检查条件，不能把它描述为绕过 Uniswap 审核。
+`beforeSwapReturnDelta` must be enabled for the `shellPool` to be fully settled through the `lpPool`. Therefore, this design does not satisfy the manual-review condition that all four return-delta flags are false, and it must not be described as bypassing Uniswap review.
 
-## 报价与发现边界
+## Quoting and Discovery Boundaries
 
-Hook 实现通用 `IAggregatorHook` ABI：
+The Hook implements the generic `IAggregatorHook` ABI:
 
-- `quote(bool,int256,PoolId)` 调用官方 V4Quoter 模拟完整 outer route，而不是只计算 inner swap。PoolManager 物理库存、wrap、unwrap 和 full-fill 检查都会进入报价。
-- `pseudoTotalValueLocked(PoolId)` 返回 inner 当前 active liquidity 的 virtual-depth proxy。它不是可提款 TVL，也不是 PoolManager 全局 token balance。
-- `AggregatorPoolRegistered` 和 `HookSwap` 保留通用索引事件。
+- `quote(bool,int256,PoolId)` uses the official `V4Quoter` to simulate the complete shell-pool route rather than calculating only the `lpPool` swap. PoolManager physical inventory, wrapping, unwrapping, and the full-fill check are all included in the quote.
+- `pseudoTotalValueLocked(PoolId)` returns a virtual-depth proxy based on the current active liquidity of the `lpPool`. It is not withdrawable TVL and is not the global token balance held by the PoolManager.
+- `AggregatorPoolRegistered` and `HookSwap` are retained as generic indexing events.
 
-这些接口和标准 `PoolKey` 足以让通用 v4 quoter 执行该池，但不等于 0x、Uniswap 或其他 solver 一定会自动发现并放入候选集。部署后的验收必须读取真实 API quote response，确认 route 中出现 outer PoolId / Hook 地址；“交易能成功”与“聚合器已收录”是两个状态。
+These interfaces and the standard `PoolKey` are sufficient for a generic v4 quoter to execute the pool, but they do not mean that 0x, Uniswap, or another solver will automatically discover and include it in its candidate set. Post-deployment validation must inspect real API quote responses and confirm that the route contains the shell PoolId or Hook address. A successful transaction and aggregator discovery are separate states.
 
-## 已验证
+## Verification Coverage
 
-本地真实 PoolManager 集成覆盖：
+Local integration tests using a real PoolManager cover:
 
-- wrapper 地址排序同向和反向；
-- exact-in / exact-out × 双向；
-- Hook quote、direct inner quote 和实际成交逐 wei 一致；
-- outer liquidity 不因成交变化，outer slot0 不移动，inner slot0 确实移动；
-- 非 PositionManager 的任意 router 加流动性、以及 PositionManager 上非 owner 持有的头寸，都以 `LiquidityNotAllowed` 回滚；owner 头寸可加、可全额取回，且加完后成交依旧走 inner 池；
-- Hook 四种 ERC-20 余额和四种 transient delta 回到 0；
-- 现有 origin/FewToken wrapper 池的 slot0 和 liquidity 不变化；
-- PoolManager origin token 物理余额在 router 结算后恢复；
-- partial fill、库存不足、非极值 limit、非空 hookData、恶意 wrapper 重入和假返回值全部原子回滚。
+- Both aligned and reversed wrapper-address ordering;
+- Exact-in and exact-out swaps in both directions;
+- Wei-level agreement between Hook quotes, direct `lpPool` quotes, and executed swaps;
+- Shell-pool liquidity remaining unchanged, the shell-pool `slot0` remaining unchanged, and the `lpPool` `slot0` moving;
+- Liquidity operations through arbitrary non-PositionManager routers and PositionManager positions held by non-owners reverting with `LiquidityNotAllowed`; owner positions can be added and fully removed, while swaps continue to execute through the `lpPool`;
+- All four Hook ERC-20 balances and transient deltas returning to zero;
+- Existing origin/FewToken wrapper-pool `slot0` and liquidity remaining unchanged;
+- PoolManager physical origin-token inventory returning to its prior value after router settlement;
+- Partial fills, insufficient inventory, non-extreme price limits, non-empty `hookData`, malicious wrapper reentrancy, and false return values all reverting atomically.
 
-Ethereum mainnet 固定块 `25,833,244` 还验证了真实：
+At Ethereum mainnet fixed block `25,833,244`, the fork tests also verified:
 
-- inner `fwUSDC/fwUSDT` PoolId `0x6199c1a871328a693bbc9cd80a7e4874a4a7e2ebc862b51fa04bb6b587dbac47`；
-- wrapper pools `fwUSDC/USDC` 和 `USDT/fwUSDT`；
-- USDC/USDT 双向 exact-in / exact-out 四组 quote 与实际成交一致；
-- 两个 wrapper pool 的 slot0 和 liquidity 均未变化；
-- 真实 PositionManager `0xbD216513d74C8cf14cf4747E6AaA6420FF64ee9e` + Permit2 的 MINT_POSITION：owner 成功、非 owner 以 `LiquidityNotAllowed` 回滚、BURN_POSITION 可全额取回。fork 测试支持 `FORK_BLOCK=0` 跟随 RPC head，便于对本地 anvil 主网 fork 复跑。
+- The real `fwUSDC/fwUSDT` `lpPool` with PoolId `0x6199c1a871328a693bbc9cd80a7e4874a4a7e2ebc862b51fa04bb6b587dbac47`;
+- The wrapper pools `fwUSDC/USDC` and `USDT/fwUSDT`;
+- Four bidirectional USDC/USDT exact-in and exact-out quote/execution cases;
+- Both wrapper pools retaining their `slot0` and liquidity;
+- The real PositionManager `0xbD216513d74C8cf14cf4747E6AaA6420FF64ee9e` plus Permit2: owner minting succeeds, non-owner minting reverts with `LiquidityNotAllowed`, and `BURN_POSITION` fully removes the position. The fork test supports `FORK_BLOCK=0` to follow the RPC head for reruns against a local Anvil mainnet fork.
 
-以上只证明固定块上的合约执行和会计，不代表当前流动性、部署安全或聚合器收录。
+These results demonstrate contract execution and accounting at the fixed block only. They do not establish current liquidity, deployment safety, or aggregator discovery.
 
-## 部署顺序
+## Deployment Sequence
 
-本节只在完成独立安全审计并确认官方 routing 接入方式后执行。
+This section should only be followed after an independent security audit and confirmation of the official routing integration process.
 
-1. 审计 `src/FewV4ShellHook.sol`，不要沿用现有 FewV2 Hook 的审计结论。
-2. 在目标块重新跑 fork、库存和各 size quote 矩阵。
-3. 用 `script/MineFewV4ShellHookAddress.s.sol` 读取 inner 池并生成当前 init code 对应的 salt/address。
-4. 人工核对 factory、quoter、PoolManager、inner PoolId、fee、tick spacing 和 Hook mask。
-5. 使用 `script/DeployFewV4ShellHookWithOwner.s.sol` 部署 Hook，并通过 `HOOK_OWNER` 在同一部署流程中设置 owner；该脚本不会初始化 outer pool。部署后再由 owner/LP 按目标 PoolKey 单独初始化并提供所需库存；先只做 USDC/USDT 单 pair。
-6. source verify 后，用 Universal Router 和生产 0x quote API 做双向、多个金额档的 read-only 验证。
-7. 只有 API 返回结果明确包含该 Hook route，才能把状态改成“已被聚合器考虑”；看到真实成交后才能改成“已有流量”。
+1. Audit `src/FewV4ShellHook.sol`; do not reuse audit conclusions from the existing FewV2 Hook.
+2. Rerun fork tests, inventory checks, and quote matrices for all target sizes at the target block.
+3. Use `script/MineFewV4ShellHookAddress.s.sol` to inspect the `lpPool` and generate the salt/address for the current init code.
+4. Manually verify the factory, quoter, PoolManager, `lpPool` PoolId, fee, tick spacing, and Hook permission mask.
+5. Deploy the Hook with `script/DeployFewV4ShellHookWithOwner.s.sol`, setting the owner through `HOOK_OWNER` during the same deployment flow. This script does not initialize the `shellPool`. The owner/LP must initialize the target PoolKey and provide the required inventory separately; begin with a single USDC/USDT pair.
+6. Verify the source, then perform read-only bidirectional validation across multiple trade sizes using the Universal Router and the production 0x quote API.
+7. Only change the status to “considered by the aggregator” when the API response clearly includes the Hook route. Only change it to “receiving flow” after observing a real transaction.
 
-CREATE2 地址绑定完整 init code，也包含 Solidity metadata。挖地址和部署必须使用完全相同的 Foundry、Solc、optimizer、`bytecode_hash` 和源码；任一项变化都要重新挖 salt。本机 Foundry 1.5.1 默认运行 script 若报 `No contract bytecode`，已验证可在挖地址和部署 dry-run 两步都加 `FOUNDRY_BYTECODE_HASH=bzzr1 --force`，不能只在其中一步加。
+The CREATE2 address is bound to the complete init code, including Solidity metadata. Address mining and deployment must use exactly the same Foundry, Solc, optimizer, `bytecode_hash`, and source. Any change requires mining a new salt. With Foundry 1.5.1, if the default script execution reports `No contract bytecode`, use `FOUNDRY_BYTECODE_HASH=bzzr1 --force` for both the address-mining and deployment dry-run steps; applying it to only one step is insufficient.
 
-停止条件：任何残余 delta/余额、partial fill 被接受、wrapper 非严格 1:1、inner PoolId 可变、PoolManager origin 库存不足、quote 与执行不一致，或生产 solver 不返回该 route，均不进入资金部署阶段。
+Stop conditions: any residual delta or balance, an accepted partial fill, a non-strict 1:1 wrapper, a mutable `lpPool` PoolId, insufficient PoolManager origin inventory, a mismatch between quote and execution, or a production solver failing to return the route must prevent the deployment from proceeding to the funding phase.
