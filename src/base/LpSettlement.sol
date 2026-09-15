@@ -30,9 +30,12 @@ abstract contract LpSettlement is DeltaResolver {
         _weth = weth;
     }
 
-    function convertAndSettle(LpRouteLib.LpRoute memory route, bool shellZeroForOne, uint256 amountIn, uint256 amountOut)
-        internal
-    {
+    function convertAndSettle(
+        LpRouteLib.LpRoute memory route,
+        bool shellZeroForOne,
+        uint256 amountIn,
+        uint256 amountOut
+    ) internal {
         Currency input = Currency.wrap(shellZeroForOne ? route.token0 : route.token1);
         Currency output = Currency.wrap(shellZeroForOne ? route.token1 : route.token0);
         address fewIn = shellZeroForOne ? route.few0 : route.few1;

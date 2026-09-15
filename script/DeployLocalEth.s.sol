@@ -164,10 +164,7 @@ contract DeployLocalEth is Script {
         tokenB.approve(address(liquidityRouter), type(uint256).max);
         {
             ModifyLiquidityParams memory params = ModifyLiquidityParams({
-                tickLower: -887270,
-                tickUpper: 887270,
-                liquidityDelta: int128(int256(LIQUIDITY)),
-                salt: 0
+                tickLower: -887270, tickUpper: 887270, liquidityDelta: int128(int256(LIQUIDITY)), salt: 0
             });
             // Send generous ETH; PoolModifyLiquidityTest refunds excess
             liquidityRouter.modifyLiquidity{value: LIQUIDITY * 2}(shellKey, params, bytes(""));
@@ -197,10 +194,7 @@ contract DeployLocalEth is Script {
         // Add liquidity to lp pool (wide tick range to cover price moves in both directions)
         {
             ModifyLiquidityParams memory params = ModifyLiquidityParams({
-                tickLower: -7000,
-                tickUpper: 7000,
-                liquidityDelta: int128(int256(LIQUIDITY)),
-                salt: 0
+                tickLower: -7000, tickUpper: 7000, liquidityDelta: int128(int256(LIQUIDITY)), salt: 0
             });
             liquidityRouter.modifyLiquidity(lpKey, params, bytes(""));
         }
@@ -321,8 +315,7 @@ contract DeployLocalEth is Script {
         // 14. Verify hook has no residual balances
         // ------------------------------------------------------------------
         require(
-            IERC20(address(tokenB)).balanceOf(address(hook)) == 0
-                && IERC20(fewWETH).balanceOf(address(hook)) == 0
+            IERC20(address(tokenB)).balanceOf(address(hook)) == 0 && IERC20(fewWETH).balanceOf(address(hook)) == 0
                 && IERC20(fewTokenB).balanceOf(address(hook)) == 0,
             "hook has residual ERC20 balances"
         );
