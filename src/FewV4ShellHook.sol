@@ -293,6 +293,11 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
         LpRouteLib.LpRoute memory route = _deriveLpRoute(key);
         if (!route.available) revert LpRouteUnavailable();
 
+        // Reject amounts that would overflow the return-delta cast (mirrors the quote guard).
+        uint256 absAmount =
+            params.amountSpecified < 0 ? uint256(-params.amountSpecified) : uint256(params.amountSpecified);
+        if (absAmount > type(uint128).max) revert QuoteAmountTooLarge(absAmount, type(uint128).max);
+
         bool lpZeroForOne = params.zeroForOne == route.orderAligned;
 
         // Pre-swap check (exact-input only): PoolManager must already hold enough origin input
