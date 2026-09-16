@@ -70,8 +70,7 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
     error LpRouteUnavailable();
     error LpInsufficientInventory(address token, uint256 available, uint256 required);
     error ShellPoolNotInitialized(PoolId shellPoolId);
-    error InvalidAmount();
-    error LpHookReturnsDeltaUnsupported(address hook);
+    error QuoteAmountTooLarge(uint256 amount, uint256 max);
 
     event LpSwap(
         PoolId indexed shellPoolId,
@@ -136,13 +135,6 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
             delete lpPools[shellPoolId];
             emit LpPoolRemoved(shellPoolId);
             return;
-        }
-
-        // The lp pool's hook must not have beforeSwapReturnDelta: PoolManager accounts the hook's
-        // delta to the hook address (not to us), so convertAndSettle cannot settle it, causing
-        // unlock's all-zero-deltas check to revert the entire transaction.
-        if (uint160(address(lpPoolKey.hooks)) & Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG != 0) {
-            revert LpHookReturnsDeltaUnsupported(address(lpPoolKey.hooks));
         }
 
         // Validate: lpPoolKey.currency0/currency1 must be FewToken wrappers for shellPoolKey's
