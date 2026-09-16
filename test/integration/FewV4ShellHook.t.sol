@@ -28,6 +28,7 @@ import {V4Quoter} from "v4-periphery/src/lens/V4Quoter.sol";
 import {IV4Quoter} from "v4-periphery/src/interfaces/IV4Quoter.sol";
 
 import {FewV4ShellHook} from "../../src/FewV4ShellHook.sol";
+import {IAggregatorHook} from "../../src/interfaces/IAggregatorHook.sol";
 import {LpOwner} from "../../src/base/LpOwner.sol";
 import {IFewFactory} from "../../src/interfaces/external/IFewFactory.sol";
 import {IFewWrappedToken} from "../../src/interfaces/external/IFewWrappedToken.sol";
@@ -36,7 +37,11 @@ import {IWETH9} from "v4-periphery/src/interfaces/external/IWETH9.sol";
 import {MockFewFactory} from "../mocks/MockFewFactory.sol";
 import {MockFewWrappedToken} from "../mocks/MockFewWrappedToken.sol";
 import {MockWETH9} from "../mocks/MockWETH9.sol";
+import {QuoterRevert} from "v4-periphery/src/libraries/QuoterRevert.sol";
+import {MockSenderFeeHook} from "../mocks/MockSenderFeeHook.sol";
+import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
 import {MockNoOpHook} from "../mocks/MockNoOpHook.sol";
+import {SettlementOrderRouter} from "../helpers/SettlementOrderRouter.sol";
 
 /// @notice Integration tests for FewV4ShellHook using a fresh local PoolManager and mock FewFactory.
 contract FewV4ShellHookTest is Test {
@@ -823,6 +828,10 @@ contract FewV4ShellHookTest is Test {
 
         hook.setLpPool(shellKey, registeredLpKey);
 
+        uint256 quoted = hook.quote(true, -int256(SWAP_AMOUNT), shellKey.toId());
+        IERC20 output = IERC20(Currency.unwrap(currency1));
+        uint256 outputBefore = output.balanceOf(USER);
+
         (uint160 shellPriceBefore,,,) = manager.getSlot0(shellKey.toId());
         (uint160 registeredLpPriceBefore,,,) = manager.getSlot0(registeredLpKey.toId());
 
@@ -832,6 +841,7 @@ contract FewV4ShellHookTest is Test {
         (uint160 registeredLpPriceAfter,,,) = manager.getSlot0(registeredLpKey.toId());
         assertEq(shellPriceAfter, shellPriceBefore, "shell price unchanged");
         assertTrue(registeredLpPriceAfter != registeredLpPriceBefore, "registered lp price moved");
+        assertEq(output.balanceOf(USER) - outputBefore, quoted, "registered fee quote matches execution");
     }
 
     function test_registeredLpPoolWithHook_routesToHookedPool() public {
@@ -862,6 +872,10 @@ contract FewV4ShellHookTest is Test {
         // Register the hooked lp pool.
         hook.setLpPool(shellKey, hookedLpKey);
 
+        uint256 quoted = hook.quote(true, -int256(SWAP_AMOUNT), shellKey.toId());
+        IERC20 output = IERC20(Currency.unwrap(currency1));
+        uint256 outputBefore = output.balanceOf(USER);
+
         (uint160 shellPriceBefore,,,) = manager.getSlot0(shellKey.toId());
         (uint160 hookedLpPriceBefore,,,) = manager.getSlot0(hookedLpKey.toId());
 
@@ -871,6 +885,7 @@ contract FewV4ShellHookTest is Test {
         (uint160 hookedLpPriceAfter,,,) = manager.getSlot0(hookedLpKey.toId());
         assertEq(shellPriceAfter, shellPriceBefore, "shell price unchanged");
         assertTrue(hookedLpPriceAfter != hookedLpPriceBefore, "hooked lp price moved");
+        assertEq(output.balanceOf(USER) - outputBefore, quoted, "hooked lp quote matches execution");
     }
 
     function test_emptyKeyRemovalFallsBackToAutoInference() public {
@@ -945,6 +960,317 @@ contract FewV4ShellHookTest is Test {
     // quote tests
     // ---------------------------------------------------------------------
 
+    function test_initializationKeepsAggregatorDiscoveryEvent() public {
+        PoolKey memory anotherShell = shellKey;
+        anotherShell.fee = 3000;
+        vm.expectEmit(true, false, false, true, address(hook));
+        emit IAggregatorHook.AggregatorPoolRegistered(anotherShell.toId());
+        manager.initialize(anotherShell, SQRT_PRICE_1_1);
+        assertEq(hook.initedPoolCount(), 2);
+    }
+
+    function test_quoteRejectsInvalidAmountsWithoutTruncation() public {
+        manager.initialize(lpKey, SQRT_PRICE_1_1);
+        _addLpLiquidity(LP_LIQUIDITY);
+        int256[5] memory amounts = [
+            int256(0),
+            int256(type(int128).max) + 1,
+            -int256(type(int128).max) - 1,
+            int256(uint256(type(uint128).max)) + 1,
+            type(int256).min
+        ];
+        for (uint256 i; i < amounts.length; ++i) {
+            vm.expectRevert(FewV4ShellHook.InvalidAmount.selector);
+            hook.quote(true, amounts[i], shellKey.toId());
+        }
+    }
+
+    function test_signedAmountBoundsRejectQuoteAndSwapBothDirections() public {
+        manager.initialize(lpKey, SQRT_PRICE_1_1);
+        _addLpLiquidity(LP_LIQUIDITY);
+        int256[7] memory amounts = [
+            int256(type(int128).max) + 1,
+            -int256(type(int128).max) - 1,
+            int256(uint256(type(uint128).max)),
+            -int256(uint256(type(uint128).max)),
+            int256(uint256(type(uint128).max)) + 1,
+            type(int256).min,
+            type(int256).max
+        ];
+        // Reproduce the old false quote with ample input inventory on both sides.
+        tokenA.mint(address(manager), type(uint128).max);
+        tokenB.mint(address(manager), type(uint128).max);
+        for (uint256 side; side < 2; ++side) {
+            for (uint256 i; i < amounts.length; ++i) {
+                vm.expectRevert(FewV4ShellHook.InvalidAmount.selector);
+                hook.quote(side == 0, amounts[i], shellKey.toId());
+                _expectLpRevertOnSwap(side == 0, amounts[i], FewV4ShellHook.InvalidAmount.selector);
+            }
+        }
+    }
+
+    function test_senderDependentLpFeeMatchesQuoteAndExecution() public {
+        address feeHook = address(uint160(Hooks.BEFORE_SWAP_FLAG));
+        MockSenderFeeHook implementation = new MockSenderFeeHook(address(v4Quoter));
+        vm.etch(feeHook, address(implementation).code);
+        PoolKey memory hookedKey = lpKey;
+        hookedKey.hooks = IHooks(feeHook);
+        hookedKey.fee = LPFeeLibrary.DYNAMIC_FEE_FLAG;
+        manager.initialize(hookedKey, SQRT_PRICE_1_1);
+        _addLpLiquidityWithKey(hookedKey, LP_LIQUIDITY);
+        hook.setLpPool(shellKey, hookedKey);
+
+        for (uint256 side; side < 2; ++side) {
+            for (uint256 tradeType; tradeType < 2; ++tradeType) {
+                uint256 snapshot = vm.snapshotState();
+                bool zeroForOne = side == 0;
+                bool exactInput = tradeType == 0;
+                int256 amount = exactInput ? -int256(SWAP_AMOUNT) : int256(SWAP_AMOUNT);
+                IERC20 input = IERC20(Currency.unwrap(zeroForOne ? currency0 : currency1));
+                IERC20 output = IERC20(Currency.unwrap(zeroForOne ? currency1 : currency0));
+                uint256 inputBefore = input.balanceOf(USER);
+                uint256 outputBefore = output.balanceOf(USER);
+                (uint160 priceBefore,,,) = manager.getSlot0(hookedKey.toId());
+                uint256 quoteAmount = hook.quote(zeroForOne, amount, shellKey.toId());
+                (uint160 priceAfter,,,) = manager.getSlot0(hookedKey.toId());
+                assertEq(priceAfter, priceBefore, "quote rolls back LP price");
+                assertEq(input.balanceOf(USER), inputBefore, "quote does not charge user");
+                assertEq(output.balanceOf(USER), outputBefore, "quote does not deliver output");
+
+                IV4Quoter.QuoteExactSingleParams memory directParams = IV4Quoter.QuoteExactSingleParams({
+                    poolKey: hookedKey,
+                    zeroForOne: zeroForOne == orderAligned,
+                    exactAmount: uint128(SWAP_AMOUNT),
+                    hookData: bytes("")
+                });
+                uint256 directQuote;
+                if (exactInput) (directQuote,) = v4Quoter.quoteExactInputSingle(directParams);
+                else (directQuote,) = v4Quoter.quoteExactOutputSingle(directParams);
+                if (exactInput) assertGt(directQuote, quoteAmount, "direct quote incorrectly applies discounted fee");
+                else assertLt(directQuote, quoteAmount, "direct quote underestimates actual input");
+
+                _swapAsUser(zeroForOne, amount);
+                uint256 paid = inputBefore - input.balanceOf(USER);
+                uint256 received = output.balanceOf(USER) - outputBefore;
+                assertEq(paid, exactInput ? SWAP_AMOUNT : quoteAmount, "quoted input matches wallet");
+                assertEq(received, exactInput ? quoteAmount : SWAP_AMOUNT, "quoted output matches wallet");
+                assertEq(input.balanceOf(address(hook)), 0);
+                assertEq(output.balanceOf(address(hook)), 0);
+                assertEq(IERC20(fewA).balanceOf(address(hook)), 0);
+                assertEq(IERC20(fewB).balanceOf(address(hook)), 0);
+                assertTrue(vm.revertToState(snapshot));
+            }
+        }
+    }
+
+    function test_prepaidTenTokensExecutesWithZeroOrOneTokenInventory() public {
+        manager.initialize(lpKey, SQRT_PRICE_1_1);
+        _addLpLiquidity(LP_LIQUIDITY);
+        SettlementOrderRouter router = new SettlementOrderRouter(manager);
+        vm.startPrank(USER);
+        tokenA.approve(address(router), type(uint256).max);
+        tokenB.approve(address(router), type(uint256).max);
+        vm.stopPrank();
+
+        for (uint256 side; side < 2; ++side) {
+            for (uint256 initial; initial < 2; ++initial) {
+                uint256 snapshot = vm.snapshotState();
+                bool zeroForOne = side == 0;
+                MockERC20 input = MockERC20(Currency.unwrap(zeroForOne ? currency0 : currency1));
+                IERC20 output = IERC20(Currency.unwrap(zeroForOne ? currency1 : currency0));
+                input.burn(address(manager), input.balanceOf(address(manager)) - initial * 1e18);
+                uint256 outputBefore = output.balanceOf(USER);
+                uint256 inputBefore = input.balanceOf(USER);
+                (bool quoted,) =
+                    address(hook).call(abi.encodeCall(hook.quote, (zeroForOne, -int256(10e18), shellKey.toId())));
+                assertFalse(quoted, "standard quote conservatively models postpayment");
+                _expectLpRevertOnSwap(zeroForOne, -int256(10e18), FewV4ShellHook.LpInsufficientInventory.selector);
+
+                vm.prank(USER);
+                router.swap(
+                    shellKey,
+                    SwapParams({
+                        zeroForOne: zeroForOne,
+                        amountSpecified: -int256(10e18),
+                        sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
+                    }),
+                    true
+                );
+                assertEq(inputBefore - input.balanceOf(USER), 10e18, "full ten-token fill");
+                assertGt(output.balanceOf(USER) - outputBefore, 0, "output delivered");
+                assertEq(input.balanceOf(address(manager)), initial * 1e18, "no initial inventory consumed");
+                assertEq(input.balanceOf(address(hook)), 0);
+                assertEq(output.balanceOf(address(hook)), 0);
+                assertTrue(vm.revertToState(snapshot));
+            }
+        }
+    }
+
+    function test_nativeEthPrepaymentWithZeroManagerEth() public {
+        vm.deal(address(this), 30_000 ether);
+        weth.deposit{value: 25_000 ether}();
+        factory.createToken(address(weth));
+        address fewEth = factory.getWrappedToken(address(weth));
+        currency0 = Currency.wrap(address(0));
+        currency1 = Currency.wrap(address(tokenB));
+        orderAligned = fewEth < fewB;
+        shellKey = PoolKey(currency0, currency1, FEE, TICK_SPACING, IHooks(address(hook)));
+        lpKey = PoolKey({
+            currency0: Currency.wrap(orderAligned ? fewEth : fewB),
+            currency1: Currency.wrap(orderAligned ? fewB : fewEth),
+            fee: FEE,
+            tickSpacing: TICK_SPACING,
+            hooks: IHooks(address(0))
+        });
+        manager.initialize(shellKey, SQRT_PRICE_1_1);
+        manager.initialize(lpKey, SQRT_PRICE_1_1);
+        hook.setLpPool(shellKey, lpKey);
+        _addLpLiquidity(LP_LIQUIDITY);
+        SettlementOrderRouter router = new SettlementOrderRouter(manager);
+        vm.prank(USER);
+        tokenB.approve(address(router), type(uint256).max);
+        vm.deal(address(manager), 20 ether);
+        vm.deal(USER, 100 ether);
+        for (uint256 side; side < 2; ++side) {
+            for (uint256 kind; kind < 2; ++kind) {
+                uint256 snapshot = vm.snapshotState();
+                bool zeroForOne = side == 0;
+                int256 specified = kind == 0 ? -int256(0.01 ether) : int256(0.01 ether);
+                uint256 quoted = hook.quote(zeroForOne, specified, shellKey.toId());
+                uint256 nativeBefore = USER.balance;
+                uint256 tokenBefore = tokenB.balanceOf(USER);
+                uint256 nativePayment = zeroForOne ? (kind == 0 ? 0.01 ether : quoted) : 0;
+                vm.prank(USER);
+                router.swap{value: nativePayment}(
+                    shellKey,
+                    SwapParams({
+                        zeroForOne: zeroForOne,
+                        amountSpecified: specified,
+                        sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
+                    }),
+                    false
+                );
+                if (zeroForOne) {
+                    assertEq(nativeBefore - USER.balance, nativePayment);
+                    assertEq(tokenB.balanceOf(USER) - tokenBefore, kind == 0 ? quoted : 0.01 ether);
+                } else {
+                    assertEq(tokenBefore - tokenB.balanceOf(USER), kind == 0 ? 0.01 ether : quoted);
+                    assertEq(USER.balance - nativeBefore, kind == 0 ? quoted : 0.01 ether);
+                }
+                assertEq(address(hook).balance, 0);
+                assertEq(weth.balanceOf(address(hook)), 0);
+                assertTrue(vm.revertToState(snapshot));
+            }
+        }
+        vm.deal(address(manager), 0);
+        vm.deal(USER, 10 ether);
+        uint256 outputBefore = tokenB.balanceOf(USER);
+        vm.prank(USER);
+        router.swap{value: 10 ether}(
+            shellKey,
+            SwapParams({
+                zeroForOne: true, amountSpecified: -int256(10 ether), sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
+            }),
+            true
+        );
+        assertEq(USER.balance, 0, "all ten ETH paid");
+        assertEq(address(manager).balance, 0, "manager ETH restored");
+        assertEq(address(hook).balance, 0);
+        assertEq(weth.balanceOf(address(hook)), 0);
+        assertGt(tokenB.balanceOf(USER), outputBefore);
+    }
+
+    function testFuzz_quoteMatchesSettlement(uint256 requested, bool zeroForOne, bool exactIn) public {
+        requested = bound(requested, 1e12, 1e18);
+        manager.initialize(lpKey, SQRT_PRICE_1_1);
+        _addLpLiquidity(LP_LIQUIDITY);
+        int256 specified = exactIn ? -int256(requested) : int256(requested);
+        uint256 quoted = hook.quote(zeroForOne, specified, shellKey.toId());
+        IERC20 input = IERC20(Currency.unwrap(zeroForOne ? currency0 : currency1));
+        IERC20 output = IERC20(Currency.unwrap(zeroForOne ? currency1 : currency0));
+        uint256 inputBefore = input.balanceOf(USER);
+        uint256 outputBefore = output.balanceOf(USER);
+        _swapAsUser(zeroForOne, specified);
+        assertEq(inputBefore - input.balanceOf(USER), exactIn ? requested : quoted);
+        assertEq(output.balanceOf(USER) - outputBefore, exactIn ? quoted : requested);
+        assertEq(input.balanceOf(address(hook)), 0);
+        assertEq(output.balanceOf(address(hook)), 0);
+    }
+
+    function test_quoteRejectsUnfundedSettlement_bothDirectionsAndTradeTypes() public {
+        manager.initialize(lpKey, SQRT_PRICE_1_1);
+        _addLpLiquidity(LP_LIQUIDITY);
+        MockERC20(Currency.unwrap(currency0))
+            .burn(address(manager), IERC20(Currency.unwrap(currency0)).balanceOf(address(manager)));
+        MockERC20(Currency.unwrap(currency1))
+            .burn(address(manager), IERC20(Currency.unwrap(currency1)).balanceOf(address(manager)));
+
+        for (uint256 side; side < 2; ++side) {
+            for (uint256 kind; kind < 2; ++kind) {
+                int256 amount = kind == 0 ? -int256(SWAP_AMOUNT / 100) : int256(SWAP_AMOUNT / 100);
+                (bool success,) = address(hook).call(abi.encodeCall(hook.quote, (side == 0, amount, shellKey.toId())));
+                assertFalse(success, "quote must not advertise an unfunded settlement");
+                _expectLpRevertOnSwap(side == 0, amount, FewV4ShellHook.LpInsufficientInventory.selector);
+            }
+        }
+    }
+
+    function test_quoteRejectsUnbackedOutput_bothDirectionsAndTradeTypes() public {
+        manager.initialize(lpKey, SQRT_PRICE_1_1);
+        _addLpLiquidity(LP_LIQUIDITY);
+        MockERC20(address(tokenA)).burn(fewA, tokenA.balanceOf(fewA));
+        MockERC20(address(tokenB)).burn(fewB, tokenB.balanceOf(fewB));
+
+        for (uint256 side; side < 2; ++side) {
+            for (uint256 kind; kind < 2; ++kind) {
+                int256 amount = kind == 0 ? -int256(SWAP_AMOUNT / 100) : int256(SWAP_AMOUNT / 100);
+                (bool success,) = address(hook).call(abi.encodeCall(hook.quote, (side == 0, amount, shellKey.toId())));
+                assertFalse(success, "quote must check the wrapper's redeemable underlying");
+                _expectLpRevertOnSwap(side == 0, amount, FewV4ShellHook.LpInsufficientInventory.selector);
+            }
+        }
+    }
+
+    function test_quoteMatchesFullShellAndExecution_bothDirectionsAndTradeTypes() public {
+        manager.initialize(lpKey, SQRT_PRICE_1_1);
+        _addLpLiquidity(LP_LIQUIDITY);
+        for (uint256 side; side < 2; ++side) {
+            for (uint256 kind; kind < 2; ++kind) {
+                uint256 snapshot = vm.snapshotState();
+                bool zeroForOne = side == 0;
+                uint128 amount = uint128(SWAP_AMOUNT / 100);
+                IV4Quoter.QuoteExactSingleParams memory p = IV4Quoter.QuoteExactSingleParams({
+                    poolKey: shellKey, zeroForOne: zeroForOne, exactAmount: amount, hookData: bytes("")
+                });
+                int256 specified = kind == 0 ? -int256(uint256(amount)) : int256(uint256(amount));
+                (uint160 priceBefore,,,) = manager.getSlot0(lpKey.toId());
+                uint256 managerA = tokenA.balanceOf(address(manager));
+                uint256 managerB = tokenB.balanceOf(address(manager));
+                uint256 backingA = tokenA.balanceOf(fewA);
+                uint256 backingB = tokenB.balanceOf(fewB);
+                uint256 quoted = hook.quote(zeroForOne, specified, shellKey.toId());
+                (uint256 fullQuote,) =
+                    kind == 0 ? v4Quoter.quoteExactInputSingle(p) : v4Quoter.quoteExactOutputSingle(p);
+                assertEq(quoted, fullQuote, "full shell quote");
+                (uint160 priceAfter,,,) = manager.getSlot0(lpKey.toId());
+                assertEq(priceBefore, priceAfter, "quote rolls back pool price");
+                assertEq(managerA, tokenA.balanceOf(address(manager)), "quote rolls back manager token A");
+                assertEq(managerB, tokenB.balanceOf(address(manager)), "quote rolls back manager token B");
+                assertEq(backingA, tokenA.balanceOf(fewA), "quote rolls back backing A");
+                assertEq(backingB, tokenB.balanceOf(fewB), "quote rolls back backing B");
+
+                address input = Currency.unwrap(zeroForOne ? currency0 : currency1);
+                address output = Currency.unwrap(zeroForOne ? currency1 : currency0);
+                uint256 inputBefore = IERC20(input).balanceOf(USER);
+                uint256 outputBefore = IERC20(output).balanceOf(USER);
+                _swapAsUser(zeroForOne, specified);
+                assertEq(inputBefore - IERC20(input).balanceOf(USER), kind == 0 ? uint256(amount) : quoted);
+                assertEq(IERC20(output).balanceOf(USER) - outputBefore, kind == 0 ? quoted : uint256(amount));
+                assertTrue(vm.revertToState(snapshot));
+            }
+        }
+    }
+
     function test_quote_exactInput_returnsExpectedAmountOut() public {
         manager.initialize(lpKey, _lpPriceForBetterZeroForOne());
         _addCurLiquidity(1e18);
@@ -991,10 +1317,7 @@ contract FewV4ShellHookTest is Test {
         uint256 pmBalance = MockERC20(inputToken).balanceOf(address(manager));
         MockERC20(inputToken).burn(address(manager), pmBalance);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(FewV4ShellHook.LpInsufficientInventory.selector, inputToken, 0, SWAP_AMOUNT / 100)
-        );
-        hook.quote(true, -int256(SWAP_AMOUNT / 100), shellKey.toId());
+        _expectInventoryQuoteRevert(-int256(SWAP_AMOUNT / 100));
     }
 
     function test_quote_revertsWhenPoolManagerInventoryZero_exactOutput() public {
@@ -1010,13 +1333,8 @@ contract FewV4ShellHookTest is Test {
         uint256 pmBalance = MockERC20(inputToken).balanceOf(address(manager));
         MockERC20(inputToken).burn(address(manager), pmBalance);
 
-        // Exact-output: V4Quoter returns amountIn, then post-check fails.
-        // We don't know the exact amountIn, so check the selector via try/catch.
-        try hook.quote(true, int256(SWAP_AMOUNT / 100), shellKey.toId()) {
-            assertTrue(false, "expected revert");
-        } catch (bytes memory reason) {
-            assertEq(bytes4(reason), FewV4ShellHook.LpInsufficientInventory.selector, "selector");
-        }
+        // Full shell simulation reports the inventory failure inside the Quoter error.
+        _expectInventoryQuoteRevert(int256(SWAP_AMOUNT / 100));
     }
 
     function test_quote_revertsWhenFewOutInventoryZero_exactInput() public {
@@ -1031,13 +1349,8 @@ contract FewV4ShellHookTest is Test {
         uint256 underlyingBal = MockERC20(underlying).balanceOf(fewOut);
         MockERC20(underlying).burn(fewOut, underlyingBal);
 
-        // V4Quoter succeeds (lp pool swap only moves fewTokens), then our post-check fails.
-        // The output amount is unknown, so check the selector via try/catch.
-        try hook.quote(true, -int256(SWAP_AMOUNT / 100), shellKey.toId()) {
-            assertTrue(false, "expected revert");
-        } catch (bytes memory reason) {
-            assertEq(bytes4(reason), FewV4ShellHook.LpInsufficientInventory.selector, "selector");
-        }
+        // Full shell simulation checks output backing before attempting conversion.
+        _expectInventoryQuoteRevert(-int256(SWAP_AMOUNT / 100));
     }
 
     function test_quote_revertsWhenFewOutInventoryZero_exactOutput() public {
@@ -1051,11 +1364,7 @@ contract FewV4ShellHookTest is Test {
         uint256 underlyingBal = MockERC20(underlying).balanceOf(fewOut);
         MockERC20(underlying).burn(fewOut, underlyingBal);
 
-        try hook.quote(true, int256(SWAP_AMOUNT / 100), shellKey.toId()) {
-            assertTrue(false, "expected revert");
-        } catch (bytes memory reason) {
-            assertEq(bytes4(reason), FewV4ShellHook.LpInsufficientInventory.selector, "selector");
-        }
+        _expectInventoryQuoteRevert(int256(SWAP_AMOUNT / 100));
     }
 
     function test_quote_revertsWhenAmountExceedsUint128() public {
@@ -1068,15 +1377,11 @@ contract FewV4ShellHookTest is Test {
         uint256 tooLarge = uint256(type(uint128).max) + 1;
 
         // Exact-input (negative amountSpecified).
-        vm.expectRevert(
-            abi.encodeWithSelector(FewV4ShellHook.QuoteAmountTooLarge.selector, tooLarge, type(uint128).max)
-        );
+        vm.expectRevert(FewV4ShellHook.InvalidAmount.selector);
         hook.quote(true, -int256(tooLarge), shellKey.toId());
 
         // Exact-output (positive amountSpecified).
-        vm.expectRevert(
-            abi.encodeWithSelector(FewV4ShellHook.QuoteAmountTooLarge.selector, tooLarge, type(uint128).max)
-        );
+        vm.expectRevert(FewV4ShellHook.InvalidAmount.selector);
         hook.quote(true, int256(tooLarge), shellKey.toId());
     }
 
@@ -1085,7 +1390,7 @@ contract FewV4ShellHookTest is Test {
         _addCurLiquidity(1e18);
         _addLpLiquidity(LP_LIQUIDITY);
 
-        vm.expectRevert(abi.encodeWithSelector(FewV4ShellHook.LpSwapPartialFill.selector, 0, 0));
+        vm.expectRevert(FewV4ShellHook.InvalidAmount.selector);
         hook.quote(true, 0, shellKey.toId());
     }
 
@@ -1190,33 +1495,8 @@ contract FewV4ShellHookTest is Test {
 
     function test_beforeSwap_revertsWhenAmountExceedsUint128() public {
         manager.initialize(lpKey, _lpPriceForBetterZeroForOne());
-        _addCurLiquidity(1e18);
         _addLpLiquidity(LP_LIQUIDITY);
-
-        uint256 tooLarge = uint256(type(uint128).max) + 1;
-
-        PoolSwapTest.TestSettings memory settings =
-            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
-
-        try swapRouter.swap(
-            shellKey,
-            SwapParams({
-                zeroForOne: true, amountSpecified: -int256(tooLarge), sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
-            }),
-            settings,
-            bytes("")
-        ) {
-            assertTrue(false, "expected QuoteAmountTooLarge");
-        } catch (bytes memory reason) {
-            assertEq(bytes4(reason), CustomRevert.WrappedError.selector, "ERC-7751 wrapper");
-            (, bytes4 fnSelector, bytes memory inner,) =
-                abi.decode(_stripSelector(reason), (address, bytes4, bytes, bytes));
-            assertEq(fnSelector, IHooks.beforeSwap.selector, "wrapper selector");
-            assertEq(bytes4(inner), FewV4ShellHook.QuoteAmountTooLarge.selector, "inner selector");
-            (uint256 amount, uint256 max) = abi.decode(_stripSelector(inner), (uint256, uint256));
-            assertEq(amount, tooLarge, "amount");
-            assertEq(max, type(uint128).max, "max");
-        }
+        _expectLpRevertOnSwap(true, -int256(uint256(type(uint128).max) + 1), FewV4ShellHook.InvalidAmount.selector);
     }
 
     // ---------------------------------------------------------------------
@@ -1371,6 +1651,19 @@ contract FewV4ShellHookTest is Test {
 
     /// @dev Returns `data` without its leading 4-byte selector, so abi.decode can consume a
     ///      custom-error payload.
+    function _expectInventoryQuoteRevert(int256 amount) internal {
+        (bool ok, bytes memory reason) = address(hook).call(abi.encodeCall(hook.quote, (true, amount, shellKey.toId())));
+        assertFalse(ok, "expected settlement inventory failure");
+        assertEq(bytes4(reason), QuoterRevert.UnexpectedRevertBytes.selector);
+        bytes memory wrapped = abi.decode(_stripSelector(reason), (bytes));
+        assertEq(bytes4(wrapped), CustomRevert.WrappedError.selector);
+        (address failedHook, bytes4 fnSelector, bytes memory inner,) =
+            abi.decode(_stripSelector(wrapped), (address, bytes4, bytes, bytes));
+        assertEq(failedHook, address(hook));
+        assertEq(fnSelector, IHooks.beforeSwap.selector);
+        assertEq(bytes4(inner), FewV4ShellHook.LpInsufficientInventory.selector);
+    }
+
     function _stripSelector(bytes memory data) internal pure returns (bytes memory) {
         bytes memory out = new bytes(data.length - 4);
         for (uint256 i = 0; i < out.length; ++i) {

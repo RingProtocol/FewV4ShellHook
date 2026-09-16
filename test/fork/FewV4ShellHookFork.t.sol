@@ -25,6 +25,7 @@ import {FewV4ShellHook} from "../../src/FewV4ShellHook.sol";
 import {IFewFactory} from "../../src/interfaces/external/IFewFactory.sol";
 import {IFewWrappedToken} from "../../src/interfaces/external/IFewWrappedToken.sol";
 import {IWETH9} from "v4-periphery/src/interfaces/external/IWETH9.sol";
+import {SettlementOrderRouter} from "../helpers/SettlementOrderRouter.sol";
 
 /// @dev The v4-core PoolSwapTest helper ABI-decodes ERC20 return values and therefore cannot settle
 ///      legacy USDT. This router uses SafeERC20, matching production-router token compatibility.
@@ -177,6 +178,72 @@ contract FewV4ShellHookForkTest is Test {
     // ---------------------------------------------------------------------
     // Tests
     // ---------------------------------------------------------------------
+
+    function test_realFullQuoteMatchesExecution_bothDirectionsAndTradeTypes() public requireFork {
+        for (uint256 side; side < 2; ++side) {
+            for (uint256 kind; kind < 2; ++kind) {
+                uint256 snapshot = vm.snapshotState();
+                bool zeroForOne = side == 0;
+                int256 specified = kind == 0 ? -int256(SWAP_AMOUNT) : int256(SWAP_AMOUNT);
+                address input = zeroForOne ? USDC : USDT;
+                address output = zeroForOne ? USDT : USDC;
+                uint256 managerIn = IERC20(input).balanceOf(address(manager));
+                uint256 managerOut = IERC20(output).balanceOf(address(manager));
+                (uint160 priceBefore,,,) = manager.getSlot0(LP_POOL_ID);
+                uint256 quoted = hook.quote(zeroForOne, specified, shellPoolId);
+                assertEq(IERC20(input).balanceOf(address(manager)), managerIn, "quote input rollback");
+                assertEq(IERC20(output).balanceOf(address(manager)), managerOut, "quote output rollback");
+                (uint160 priceAfter,,,) = manager.getSlot0(LP_POOL_ID);
+                assertEq(priceAfter, priceBefore, "quote price rollback");
+
+                uint256 inputBefore = IERC20(input).balanceOf(USER);
+                uint256 outputBefore = IERC20(output).balanceOf(USER);
+                _swapAsUser(zeroForOne, specified);
+                assertEq(inputBefore - IERC20(input).balanceOf(USER), kind == 0 ? SWAP_AMOUNT : quoted);
+                assertEq(IERC20(output).balanceOf(USER) - outputBefore, kind == 0 ? quoted : SWAP_AMOUNT);
+                assertEq(manager.getLiquidity(shellPoolId), 0, "shell requires no LP for execution");
+                assertTrue(vm.revertToState(snapshot));
+            }
+        }
+    }
+
+    function test_realPrepaidExactInputWithZeroOriginInventory_bothDirections() public requireFork {
+        SettlementOrderRouter prepaid = new SettlementOrderRouter(manager);
+        for (uint256 side; side < 2; ++side) {
+            uint256 snapshot = vm.snapshotState();
+            bool zeroForOne = side == 0;
+            address input = zeroForOne ? USDC : USDT;
+            address output = zeroForOne ? USDT : USDC;
+            deal(input, address(manager), 0);
+            for (uint256 kind; kind < 2; ++kind) {
+                int256 specified = kind == 0 ? -int256(SWAP_AMOUNT) : int256(SWAP_AMOUNT);
+                (bool quoted,) = address(hook).call(abi.encodeCall(hook.quote, (zeroForOne, specified, shellPoolId)));
+                assertFalse(quoted, "no advertised postpaid quote without input inventory");
+                vm.expectRevert();
+                _swapAsUser(zeroForOne, specified);
+            }
+            uint256 inputBefore = IERC20(input).balanceOf(USER);
+            uint256 outputBefore = IERC20(output).balanceOf(USER);
+            vm.startPrank(USER);
+            IERC20(input).forceApprove(address(prepaid), type(uint256).max);
+            prepaid.swap(
+                shellKey,
+                SwapParams({
+                    zeroForOne: zeroForOne,
+                    amountSpecified: -int256(10 * SWAP_AMOUNT),
+                    sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
+                }),
+                true
+            );
+            vm.stopPrank();
+            assertEq(inputBefore - IERC20(input).balanceOf(USER), 10 * SWAP_AMOUNT);
+            assertGt(IERC20(output).balanceOf(USER), outputBefore);
+            assertEq(IERC20(input).balanceOf(address(manager)), 0, "initial inventory restored");
+            assertEq(IERC20(input).balanceOf(address(hook)), 0);
+            assertEq(IERC20(output).balanceOf(address(hook)), 0);
+            assertTrue(vm.revertToState(snapshot));
+        }
+    }
 
     function test_realLpPoolDerivation() public requireFork {
         // The hook should derive the same lp pool ID as the known real pool.

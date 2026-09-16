@@ -8,6 +8,14 @@ The owner can register or remove an explicit `lpPool` mapping. The route is othe
 
 This package is pre-production. It is not audited, deployed, funded, indexed, or proven to receive Uniswap Labs traffic.
 
+## Quote and settlement contract
+
+`quote()` runs the complete shell swap through the official V4Quoter. It includes the nested LP swap, PoolManager input inventory, output backing, wrapping, unwrapping and full-fill checks. Amounts must fit a positive signed int128 magnitude. The quoter rolls back every simulated state change.
+
+This quote models swap-before-payment. A funded-input `SETTLE -> SWAP -> TAKE` transaction may execute even when the PoolManager's starting input balance is zero; its sender must supply the input before the hook runs. A postpaid transaction still requires sufficient PoolManager input inventory. The hook adds no working-capital ledger, claims recovery, or router-specific authorization.
+
+See [the settlement fix and acceptance results](docs/PR7_SETTLEMENT_FIX.md). Quoting, routing admission and a successful frontend fill remain separate checks.
+
 ## Review material
 
 - [Design note](docs/FEW_V4_SHELL_HOOK.md)
@@ -36,7 +44,7 @@ The review repository is [RingProtocol/FewV4ShellHook](https://github.com/RingPr
 
 ## Deploy hook
 
-The owner-aware deployment script is the supported deployment path. It deploys the hook through a helper contract and transfers ownership to `HOOK_OWNER` in the same transaction sequence. It does not initialize a pool.
+The owner-aware deployment script is the supported deployment path. It deploys the hook through a helper contract with `HOOK_OWNER` embedded in its constructor arguments, binding the CREATE2 address to the intended owner. It does not initialize a pool.
 
 ```sh
 source .env
