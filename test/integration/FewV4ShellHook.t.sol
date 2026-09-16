@@ -79,6 +79,8 @@ contract FewV4ShellHookTest is Test {
     address internal LP = makeAddr("LP");
     address internal USER = makeAddr("USER");
 
+    receive() external payable {}
+
     function setUp() public {
         // Deploy fresh PoolManager and test routers.
         manager = new PoolManager(address(this));
@@ -1166,6 +1168,193 @@ contract FewV4ShellHookTest is Test {
         // virtual1 = L * sqrtPrice / 2^96 → decreases as price drops
         // But orderAligned may invert; just check they changed.
         assertTrue(amount0After != amount0Before || amount1After != amount1Before, "pseudo TVL changed after swap");
+    }
+
+    // ---------------------------------------------------------------------
+    // _beforeSwap uint128 guard
+    // ---------------------------------------------------------------------
+
+    function test_beforeSwap_revertsWhenAmountExceedsUint128() public {
+        manager.initialize(lpKey, _lpPriceForBetterZeroForOne());
+        _addCurLiquidity(1e18);
+        _addLpLiquidity(LP_LIQUIDITY);
+
+        uint256 tooLarge = uint256(type(uint128).max) + 1;
+
+        PoolSwapTest.TestSettings memory settings =
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
+
+        try swapRouter.swap(
+            shellKey,
+            SwapParams({
+                zeroForOne: true,
+                amountSpecified: -int256(tooLarge),
+                sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
+            }),
+            settings,
+            bytes("")
+        ) {
+            assertTrue(false, "expected QuoteAmountTooLarge");
+        } catch (bytes memory reason) {
+            assertEq(bytes4(reason), CustomRevert.WrappedError.selector, "ERC-7751 wrapper");
+            (, bytes4 fnSelector, bytes memory inner,) =
+                abi.decode(_stripSelector(reason), (address, bytes4, bytes, bytes));
+            assertEq(fnSelector, IHooks.beforeSwap.selector, "wrapper selector");
+            assertEq(bytes4(inner), FewV4ShellHook.QuoteAmountTooLarge.selector, "inner selector");
+            (uint256 amount, uint256 max) = abi.decode(_stripSelector(inner), (uint256, uint256));
+            assertEq(amount, tooLarge, "amount");
+            assertEq(max, type(uint128).max, "max");
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Native ETH swap tests
+    // ---------------------------------------------------------------------
+
+    /// @dev Sets up a shell pool with native ETH as currency0 and tokenA as currency1,
+    ///      creates the fewWETH wrapper, initializes both pools, adds liquidity, and funds
+    ///      PoolManager with ETH and fewTokens for the hook's flash-take settlement.
+    function _setupNativeEthPool()
+        internal
+        returns (PoolKey memory ethShellKey, PoolKey memory ethLpKey, address fewWeth)
+    {
+        factory.createToken(address(weth));
+        fewWeth = factory.getWrappedToken(address(weth));
+
+        // address(0) < address(tokenA) → currency0 = ETH, currency1 = tokenA.
+        ethShellKey = PoolKey({
+            currency0: Currency.wrap(address(0)),
+            currency1: currencyA,
+            fee: FEE,
+            tickSpacing: TICK_SPACING,
+            hooks: IHooks(address(hook))
+        });
+
+        bool ethOrderAligned = fewWeth < fewA;
+        ethLpKey = PoolKey({
+            currency0: Currency.wrap(ethOrderAligned ? fewWeth : fewA),
+            currency1: Currency.wrap(ethOrderAligned ? fewA : fewWeth),
+            fee: FEE,
+            tickSpacing: TICK_SPACING,
+            hooks: IHooks(address(0))
+        });
+
+        manager.initialize(ethShellKey, SQRT_PRICE_1_1);
+        manager.initialize(ethLpKey, SQRT_PRICE_1_1);
+        hook.setLpPool(ethShellKey, ethLpKey);
+
+        // Shell pool liquidity (ETH + tokenA). Send generous ETH; excess is returned.
+        vm.deal(address(this), 1000 ether);
+        ModifyLiquidityParams memory shellParams = ModifyLiquidityParams({
+            tickLower: -7000, tickUpper: 7000, liquidityDelta: int128(int256(LP_LIQUIDITY)), salt: 0
+        });
+        liquidityRouter.modifyLiquidity{value: 200 ether}(ethShellKey, shellParams, bytes(""));
+
+        // lp pool liquidity (fewWETH + fewA).
+        vm.deal(address(this), 1000 ether);
+        weth.deposit{value: 400 ether}();
+        weth.approve(fewWeth, type(uint256).max);
+        IFewWrappedToken(fewWeth).wrap(300e18);
+
+        tokenA.approve(fewA, type(uint256).max);
+        IFewWrappedToken(fewA).wrap(300e18);
+
+        IERC20(fewWeth).approve(address(liquidityRouter), type(uint256).max);
+        IERC20(fewA).approve(address(liquidityRouter), type(uint256).max);
+
+        ModifyLiquidityParams memory lpParams = ModifyLiquidityParams({
+            tickLower: -7000, tickUpper: 7000, liquidityDelta: int128(int256(LP_LIQUIDITY)), salt: 0
+        });
+        liquidityRouter.modifyLiquidity(ethLpKey, lpParams, bytes(""));
+
+        // Fund PoolManager: ETH for the input flash-take, fewTokens for the output flash-take.
+        vm.deal(address(manager), 100 ether);
+        IERC20(fewWeth).transfer(address(manager), 100e18);
+        IERC20(fewA).transfer(address(manager), 100e18);
+    }
+
+    function test_nativeEthSwap_exactInput_zeroForOne() public {
+        (PoolKey memory ethShellKey, PoolKey memory ethLpKey, address fewWeth) = _setupNativeEthPool();
+
+        // Swap ETH → tokenA (zeroForOne, exact-input).
+        uint256 swapAmount = 1e18;
+        vm.deal(USER, 100 ether);
+
+        (uint160 shellPriceBefore,,,) = manager.getSlot0(ethShellKey.toId());
+        (uint160 lpPriceBefore,,,) = manager.getSlot0(ethLpKey.toId());
+
+        PoolSwapTest.TestSettings memory settings =
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
+        vm.prank(USER);
+        BalanceDelta delta = swapRouter.swap{value: swapAmount}(
+            ethShellKey,
+            SwapParams({
+                zeroForOne: true,
+                amountSpecified: -int256(swapAmount),
+                sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
+            }),
+            settings,
+            bytes("")
+        );
+
+        // lp pool was used, shell pool was not.
+        (uint160 shellPriceAfter,,,) = manager.getSlot0(ethShellKey.toId());
+        (uint160 lpPriceAfter,,,) = manager.getSlot0(ethLpKey.toId());
+        assertEq(shellPriceAfter, shellPriceBefore, "shell price unchanged");
+        assertTrue(lpPriceAfter != lpPriceBefore, "lp price moved");
+
+        // USER received tokenA.
+        assertTrue(delta.amount1() > 0, "USER received tokenA");
+
+        // Hook holds no residual balances.
+        assertEq(address(hook).balance, 0, "hook ETH");
+        assertEq(IERC20(address(weth)).balanceOf(address(hook)), 0, "hook WETH");
+        assertEq(IERC20(fewWeth).balanceOf(address(hook)), 0, "hook fewWETH");
+        assertEq(IERC20(fewA).balanceOf(address(hook)), 0, "hook fewA");
+        assertEq(tokenA.balanceOf(address(hook)), 0, "hook tokenA");
+    }
+
+    function test_nativeEthSwap_exactInput_oneForZero() public {
+        (PoolKey memory ethShellKey, PoolKey memory ethLpKey, address fewWeth) = _setupNativeEthPool();
+
+        // Swap tokenA → ETH (oneForZero, exact-input).
+        uint256 swapAmount = 1e18;
+
+        (uint160 shellPriceBefore,,,) = manager.getSlot0(ethShellKey.toId());
+        (uint160 lpPriceBefore,,,) = manager.getSlot0(ethLpKey.toId());
+
+        uint256 userEthBefore = address(USER).balance;
+
+        PoolSwapTest.TestSettings memory settings =
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
+        vm.prank(USER);
+        BalanceDelta delta = swapRouter.swap(
+            ethShellKey,
+            SwapParams({
+                zeroForOne: false,
+                amountSpecified: -int256(swapAmount),
+                sqrtPriceLimitX96: TickMath.MAX_SQRT_PRICE - 1
+            }),
+            settings,
+            bytes("")
+        );
+
+        // lp pool was used, shell pool was not.
+        (uint160 shellPriceAfter,,,) = manager.getSlot0(ethShellKey.toId());
+        (uint160 lpPriceAfter,,,) = manager.getSlot0(ethLpKey.toId());
+        assertEq(shellPriceAfter, shellPriceBefore, "shell price unchanged");
+        assertTrue(lpPriceAfter != lpPriceBefore, "lp price moved");
+
+        // USER received ETH (delta.amount0() > 0 means USER gets currency0 = ETH).
+        assertTrue(delta.amount0() > 0, "USER received ETH");
+        assertTrue(address(USER).balance > userEthBefore, "USER ETH balance increased");
+
+        // Hook holds no residual balances.
+        assertEq(address(hook).balance, 0, "hook ETH");
+        assertEq(IERC20(address(weth)).balanceOf(address(hook)), 0, "hook WETH");
+        assertEq(IERC20(fewWeth).balanceOf(address(hook)), 0, "hook fewWETH");
+        assertEq(IERC20(fewA).balanceOf(address(hook)), 0, "hook fewA");
+        assertEq(tokenA.balanceOf(address(hook)), 0, "hook tokenA");
     }
 
     // ---------------------------------------------------------------------
