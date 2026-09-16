@@ -1,96 +1,51 @@
 # FewToken v4 Shell Pool
 
-> Updated: 2026-09-01
-> Status: The review package has been organized. The Hook is deployed on Ethereum mainnet, but has not been audited and has not been confirmed to be automatically discovered by Uniswap routing.
+Updated: 2026-09-16. PR #10 is based on `optimize@3e100adc09ed277c97e6f61954a50a2a574afc8c`, after PR #9 merged. Its deployed bytecode, external audit and production routing have not been verified. Older deployment or test statements do not certify this candidate.
 
-## Overview
+## Execution and fees
 
-`FewV4ShellHook` exposes a designated hookless FewToken v4 `lpPool` as an origin-token `shellPool` for `A/B`. Users and generic v4 routers see the `A -> B` shell pool, while the actual swap execution and LP fee occur in the existing FewToken v4 `lpPool`.
+An origin-token A/B shell routes all swaps through its configured FewToken fwA/fwB v4 LP pool. The inner swap creates the input/output deltas; the hook takes origin input from PoolManager, wraps and settles the FewToken input, takes the FewToken output, unwraps it and settles origin output. The returned before-swap delta consumes the entire shell request. The shell never becomes the fallback execution venue.
 
-```text
-A/B shellPool (tracked by the Hook)
-  -> take A from PoolManager
-  -> A.wrap() -> fwA
-  -> allowlisted hookless fwA/fwB v4 lpPool swap
-  -> fwB.unwrap() -> B
-  -> settle B to PoolManager
-```
+All swap execution and LP fees remain in the internal LP pool. The hook adds no fee. Shell LP is permissionless and does not earn fees from these redirected swaps; it supplies origin inventory to the shared PoolManager. Its position holder can remove it through v4 core.
 
-This design does not require duplicating A/B liquidity and does not use the existing `A/fwA` or `B/fwB` 1:1 wrapper pools for execution. The wrapper pools are held by the same PoolManager, and their physical origin-token balances can support the Hook's atomic `take` before the router's final settlement. After the router completes settlement, the balance returns to its previous value. If the required inventory is unavailable, the quote and swap both revert.
+## Routing and settlement behavior
 
-## Fixed Design
-
-| Item | V1 choice |
+| Property | Behavior |
 |---|---|
-| Liquidity source | One exact `lpPool` PoolId from the constructor-approved route configuration or FewFactory inference |
-| `lpPool` key | Canonical FewToken pair, hookless, static fee, initialized, and currently holding active liquidity |
-| `shellPool` | Uses the shell pool's fee and tick spacing; the shell pool is not the swap execution venue |
-| Route input | The caller cannot provide an arbitrary target, `PoolKey`, or non-empty `hookData` |
-| Execution | Both exact-in and exact-out swaps must fill completely; a one-wei shortfall reverts the entire transaction |
-| Price limit | V1 accepts only the canonical v4 extreme limits; reversed token order uses strict reciprocal rounding |
-| Wrap / unwrap | Return values and actual balance changes are checked; approvals are reset after each operation |
-| Administration | No proxy, pause, fee setter, or sweep capability. The owner is a single transferable owner whose business permission is to register or remove an explicit `lpPool` mapping |
-| Additional fees | None; users only pay the existing LP/protocol fee of the `lpPool` |
-| Native ETH | The `shellPool` can use native ETH; the Hook performs the atomic conversion through WETH/FewWETH |
+| Routes | Owner-set LP mapping, or FewFactory inference when the mapping is absent |
+| Explicit LP pool | May use a different fee/tick spacing and its own hook; the existing beforeSwapReturnDelta registration restriction remains |
+| Automatic route | FewFactory wrappers, shell fee/tick spacing, hookless LP pool |
+| LP depth | The internal pool must have active liquidity; shell liquidity is not the execution depth |
+| Native ETH | Atomic ETH/WETH/FewWETH conversion remains supported |
+| Trade types | Exact-input and exact-output; both must fill completely |
+| Caller data | `hookData` is ignored and cannot select a route; the calling router enforces deadlines and amount limits |
+| Price limits | Shell limits are mapped into the internal pool's currency order |
+| Administration | Transferable owner can set/remove LP mappings; no upgrade, sweep, added fee, or pause |
+| Permissions | `beforeInitialize`, `beforeSwap`, `beforeSwapReturnDelta` (`0x2088`) |
 
-The Hook permission mask is `0x2088`:
+## Quote and payment order
 
-- `beforeInitialize`
-- `beforeSwap`
-- `beforeSwapReturnDelta`
+`quote(bool,int256,PoolId)` now calls V4Quoter with the shell key. It checks the same wrapping, backing, input inventory and full-fill conditions as a standard postpaid shell swap. Failed execution is not returned as a successful quote. Zero amounts and magnitudes above `type(int128).max` are rejected before casting.
 
-The current version does not enable `beforeAddLiquidity`. Liquidity for the `shellPool` is handled normally by v4 core, and the Hook does not perform an owner check on the add-liquidity path. Registration and removal of an explicit `lpPool` are protected by `LpOwner.onlyOwner`.
+The quoter's callback runs the actual shell hook, then reverts to recover the price. Inner hooks receive the shell hook as their sender in both quotes and execution, including when their fees depend on that sender. Pool state, wrapper balances, allowances and settlement writes made during that callback do not persist.
 
-The shell pool's liquidity acts as inventory rather than as an execution venue. `beforeSwapReturnDelta` consumes the complete requested amount, so `Pool.swap` receives zero and returns a zero delta. Consequently, shell-pool liquidity never participates in the swap and does not earn swap fees. Its purpose is to keep physical origin-token inventory in the PoolManager for the atomic `take` before wrapping. Liquidity removal is not checked by the Hook (`beforeRemoveLiquidity` remains disabled); v4 still restricts removal to the position holder. `beforeDonate` is also disabled, so v4 core rejects donations when the shell pool has no liquidity.
+For a PoolManager starting with 1 input token and an order spending 10:
 
-`beforeSwapReturnDelta` must be enabled for the `shellPool` to be fully settled through the `lpPool`. Therefore, this design does not satisfy the manual-review condition that all four return-delta flags are false, and it must not be described as bypassing Uniswap review.
+- `SWAP -> SETTLE -> TAKE` fails the input inventory check. A standard shell quote also fails.
+- `SETTLE -> SWAP -> TAKE` can succeed after the router deposits the user's 10 tokens. No extra protocol capital is implied by this execution order.
+- The output does not come from the shell's initial output-token balance. It comes from redeeming the internal swap's FewToken output, so that wrapper must have sufficient underlying backing.
+- Native ETH and WETH balances are separate. The relevant balance is the exact shell currency in the entire shared PoolManager.
 
-## Quoting and Discovery Boundaries
+A successful internal LP price alone cannot establish that a prepaid production transaction is executable. Integrators must simulate their complete calldata; this hook's standard `quote()` does not promise prepaid discovery when starting inventory is insufficient. Supporting postpayment with zero origin inventory requires a separate capital/settlement design and is outside this patch.
 
-The Hook implements the generic `IAggregatorHook` ABI:
+## Discovery and acceptance
 
-- `quote(bool,int256,PoolId)` uses the official `V4Quoter` to simulate the complete shell-pool route rather than calculating only the `lpPool` swap. PoolManager physical inventory, wrapping, unwrapping, and the full-fill check are all included in the quote.
-- `pseudoTotalValueLocked(PoolId)` returns a virtual-depth proxy based on the current active liquidity of the `lpPool`. It is not withdrawable TVL and is not the global token balance held by the PoolManager.
-- `AggregatorPoolRegistered` and `HookSwap` are retained as generic indexing events.
+`pseudoTotalValueLocked` remains an active-liquidity depth proxy in shell-token units, not withdrawable TVL or a settlement limit. `AggregatorPoolRegistered` is emitted during shell initialization. `LpSwap` identifies shell and actual execution pool. PR #7's `HookSwap` ABI declaration is not an emitted fill event in this candidate.
 
-These interfaces and the standard `PoolKey` are sufficient for a generic v4 quoter to execute the pool, but they do not mean that 0x, Uniswap, or another solver will automatically discover and include it in its candidate set. Post-deployment validation must inspect real API quote responses and confirm that the route contains the shell PoolId or Hook address. A successful transaction and aggregator discovery are separate states.
+Uniswap must approve the actual deployment and configure its discovery/retention path. A zero-liquidity shell may need ZLCA/TVL-bypass treatment or explicit external-depth integration. None of these configurations funds a swap or guarantees a competitive quote.
 
-## Verification Coverage
+Validation is recorded in [PR7_SETTLEMENT_FIX.md](PR7_SETTLEMENT_FIX.md). Final production acceptance requires the target shell to be discovered, the exact transaction to simulate successfully with measured gas and slippage, and a frontend fill that executes in the intended FewToken pool.
 
-Local integration tests using a real PoolManager cover:
+## Deployment boundary
 
-- Both aligned and reversed wrapper-address ordering;
-- Exact-in and exact-out swaps in both directions;
-- Wei-level agreement between Hook quotes, direct `lpPool` quotes, and executed swaps;
-- Shell-pool liquidity remaining unchanged, the shell-pool `slot0` remaining unchanged, and the `lpPool` `slot0` moving;
-- Liquidity operations through arbitrary non-PositionManager routers and PositionManager positions held by non-owners reverting with `LiquidityNotAllowed`; owner positions can be added and fully removed, while swaps continue to execute through the `lpPool`;
-- All four Hook ERC-20 balances and transient deltas returning to zero;
-- Existing origin/FewToken wrapper-pool `slot0` and liquidity remaining unchanged;
-- PoolManager physical origin-token inventory returning to its prior value after router settlement;
-- Partial fills, insufficient inventory, non-extreme price limits, non-empty `hookData`, malicious wrapper reentrancy, and false return values all reverting atomically.
-
-At Ethereum mainnet fixed block `25,833,244`, the fork tests also verified:
-
-- The real `fwUSDC/fwUSDT` `lpPool` with PoolId `0x6199c1a871328a693bbc9cd80a7e4874a4a7e2ebc862b51fa04bb6b587dbac47`;
-- The wrapper pools `fwUSDC/USDC` and `USDT/fwUSDT`;
-- Four bidirectional USDC/USDT exact-in and exact-out quote/execution cases;
-- Both wrapper pools retaining their `slot0` and liquidity;
-- The real PositionManager `0xbD216513d74C8cf14cf4747E6AaA6420FF64ee9e` plus Permit2: owner minting succeeds, non-owner minting reverts with `LiquidityNotAllowed`, and `BURN_POSITION` fully removes the position. The fork test supports `FORK_BLOCK=0` to follow the RPC head for reruns against a local Anvil mainnet fork.
-
-These results demonstrate contract execution and accounting at the fixed block only. They do not establish current liquidity, deployment safety, or aggregator discovery.
-
-## Deployment Sequence
-
-This section should only be followed after an independent security audit and confirmation of the official routing integration process.
-
-1. Audit `src/FewV4ShellHook.sol`; do not reuse audit conclusions from the existing FewV2 Hook.
-2. Rerun fork tests, inventory checks, and quote matrices for all target sizes at the target block.
-3. Use `script/MineFewV4ShellHookAddress.s.sol` to inspect the `lpPool` and generate the salt/address for the current init code.
-4. Manually verify the factory, quoter, PoolManager, `lpPool` PoolId, fee, tick spacing, and Hook permission mask.
-5. Deploy the Hook with `script/DeployFewV4ShellHookWithOwner.s.sol`, setting the owner through `HOOK_OWNER` during the same deployment flow. This script does not initialize the `shellPool`. The owner/LP must initialize the target PoolKey and provide the required inventory separately; begin with a single USDC/USDT pair.
-6. Verify the source, then perform read-only bidirectional validation across multiple trade sizes using the Universal Router and the production 0x quote API.
-7. Only change the status to “considered by the aggregator” when the API response clearly includes the Hook route. Only change it to “receiving flow” after observing a real transaction.
-
-The CREATE2 address is bound to the complete init code, including Solidity metadata. Address mining and deployment must use exactly the same Foundry, Solc, optimizer, `bytecode_hash`, and source. Any change requires mining a new salt. With Foundry 1.5.1, if the default script execution reports `No contract bytecode`, use `FOUNDRY_BYTECODE_HASH=bzzr1 --force` for both the address-mining and deployment dry-run steps; applying it to only one step is insufficient.
-
-Stop conditions: any residual delta or balance, an accepted partial fill, a non-strict 1:1 wrapper, a mutable `lpPool` PoolId, insufficient PoolManager origin inventory, a mismatch between quote and execution, or a production solver failing to return the route must prevent the deployment from proceeding to the funding phase.
+Source publication does not deploy or fund a contract. Any source change changes deployment bytecode; mine and verify a fresh compatible address for the final reviewed build. Use the owner-aware deployment script and explicitly verify its constructor inputs and owner. Existing deployment addresses do not inherit this source update.

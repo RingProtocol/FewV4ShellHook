@@ -70,7 +70,7 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
     error LpRouteUnavailable();
     error LpInsufficientInventory(address token, uint256 available, uint256 required);
     error ShellPoolNotInitialized(PoolId shellPoolId);
-    error QuoteAmountTooLarge(uint256 amount, uint256 max);
+    error InvalidAmount();
     error LpHookReturnsDeltaUnsupported(address hook);
 
     event LpSwap(
@@ -174,70 +174,36 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
     // Quote
     // ---------------------------------------------------------------------
 
-    /// @notice Quotes the expected amountUnspecified for a swap through the hook's lp route.
-    ///         Uses the stored V4Quoter to simulate the lp pool swap. Since wrap/unwrap is 1:1,
-    ///         the lp pool quote equals the effective quote the user would receive.
-    /// @dev Not marked `view` because V4Quoter uses revert-based simulation. Does not modify state.
-    ///      Performs the same inventory checks as _beforeSwap so that a successful quote implies
-    ///      a successful swap (no false positives from missing PoolManager or fewToken inventory).
+    /// @notice Quotes the complete shell swap, including settlement inventory, wrap/unwrap and full fill.
+    /// @dev Top-level quote using V4Quoter's revert-based simulation: every simulated state change rolls back.
+    ///      Like standard V4Quoter, this models swap-before-payment. A prepaid router may execute a trade
+    ///      unavailable to this quote, but an inner-pool price alone is not an executable shell quote.
     function quote(bool zeroToOne, int256 amountSpecified, PoolId poolId)
         external
         override
         returns (uint256 amountUnspecified)
     {
+        _validateAmount(amountSpecified);
         PoolKey memory shellKey = initedPools[poolId];
         if (address(shellKey.hooks) == address(0)) revert ShellPoolNotInitialized(poolId);
 
         LpRouteLib.LpRoute memory route = _deriveLpRoute(shellKey);
         if (!route.available) revert LpRouteUnavailable();
 
-        bool lpZeroForOne = zeroToOne == route.orderAligned;
-        PoolKey memory lpKey = route.lpKeyFromRoute();
-
-        // Reject amounts that would be truncated by the uint128 cast in V4Quoter params.
-        if (amountSpecified == 0) revert LpSwapPartialFill(0, 0);
-        uint256 exactAmount = amountSpecified < 0 ? uint256(-amountSpecified) : uint256(amountSpecified);
-        if (exactAmount > type(uint128).max) revert QuoteAmountTooLarge(exactAmount, type(uint128).max);
-
-        // Pre-check (exact-input only): PoolManager must hold enough origin input for the
-        // flash-take input leg. For exact-output, amountIn is unknown until the lp quote
-        // runs, so the check is deferred to after the V4Quoter call.
-        address inputToken = zeroToOne ? route.token0 : route.token1;
         if (amountSpecified < 0) {
-            _requireSettlementInventory(inputToken, exactAmount);
-        }
-
-        // Pre-check (exact-output only): the few token contract for the output leg must hold
-        // enough underlying to fulfill the unwrap. The output amount IS the exactAmount.
-        // For exact-input, the output is unknown until the lp quote runs, so deferred.
-        address fewOut = zeroToOne ? route.few1 : route.few0;
-        address outputUnderlying = IFewWrappedToken(fewOut).token();
-
-        if (amountSpecified < 0) {
+            uint256 exactAmount = uint256(-amountSpecified);
             (amountUnspecified,) = v4Quoter.quoteExactInputSingle(
                 IV4Quoter.QuoteExactSingleParams({
-                    poolKey: lpKey, zeroForOne: lpZeroForOne, exactAmount: uint128(exactAmount), hookData: bytes("")
+                    poolKey: shellKey, zeroForOne: zeroToOne, exactAmount: uint128(exactAmount), hookData: bytes("")
                 })
             );
-            // Post-check: the few token must hold enough underlying for the unwrapped output.
-            uint256 availableUnderlying = IERC20(outputUnderlying).balanceOf(fewOut);
-            if (availableUnderlying < amountUnspecified) {
-                revert LpInsufficientInventory(fewOut, availableUnderlying, amountUnspecified);
-            }
         } else {
-            // Exact-output: amountUnspecified is the input amount (amountIn).
+            uint256 exactAmount = uint256(amountSpecified);
             (amountUnspecified,) = v4Quoter.quoteExactOutputSingle(
                 IV4Quoter.QuoteExactSingleParams({
-                    poolKey: lpKey, zeroForOne: lpZeroForOne, exactAmount: uint128(exactAmount), hookData: bytes("")
+                    poolKey: shellKey, zeroForOne: zeroToOne, exactAmount: uint128(exactAmount), hookData: bytes("")
                 })
             );
-            // Post-check: PoolManager must hold enough origin input for the flash-take.
-            _requireSettlementInventory(inputToken, amountUnspecified);
-            // Post-check: the few token must hold enough underlying for the exact output.
-            uint256 availableUnderlying = IERC20(outputUnderlying).balanceOf(fewOut);
-            if (availableUnderlying < exactAmount) {
-                revert LpInsufficientInventory(fewOut, availableUnderlying, exactAmount);
-            }
         }
     }
 
@@ -276,6 +242,7 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
         PoolId id = key.toId();
         initedPools[id] = key;
         initedPoolIds.push(id);
+        emit AggregatorPoolRegistered(id);
         return IHooks.beforeInitialize.selector;
     }
 
@@ -295,16 +262,12 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
         nonReentrant
         returns (bytes4, BeforeSwapDelta, uint24)
     {
+        _validateAmount(params.amountSpecified);
         PoolId shellPoolId = key.toId();
 
         // lp is the only execution venue. If no route is available, revert.
         LpRouteLib.LpRoute memory route = _deriveLpRoute(key);
         if (!route.available) revert LpRouteUnavailable();
-
-        // Reject amounts that would overflow the return-delta cast (mirrors the quote guard).
-        uint256 absAmount =
-            params.amountSpecified < 0 ? uint256(-params.amountSpecified) : uint256(params.amountSpecified);
-        if (absAmount > type(uint128).max) revert QuoteAmountTooLarge(absAmount, type(uint128).max);
 
         bool lpZeroForOne = params.zeroForOne == route.orderAligned;
 
@@ -418,5 +381,12 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
         uint256 available =
             token == address(0) ? address(poolManager).balance : IERC20(token).balanceOf(address(poolManager));
         if (available < amount) revert LpInsufficientInventory(token, available, amount);
+    }
+
+    /// @dev V4 swap deltas and the quoter's exact-in cast are signed int128. Never truncate an amount.
+    function _validateAmount(int256 amount) internal pure {
+        if (amount == 0 || amount < -int256(type(int128).max) || amount > int256(type(int128).max)) {
+            revert InvalidAmount();
+        }
     }
 }
