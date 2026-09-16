@@ -2,7 +2,7 @@
 
 **日期**: 2026-09-15
 **网络**: Ethereum Sepolia (Chain ID: 11155111)
-**RPC**: `https://eth-sepolia.g.alchemy.com/v2/REDACTED`
+**RPC**: Alchemy Sepolia (key redacted)
 
 ---
 
