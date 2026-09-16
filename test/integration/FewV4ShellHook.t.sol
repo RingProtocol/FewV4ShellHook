@@ -797,9 +797,7 @@ contract FewV4ShellHookTest is Test {
             hooks: IHooks(hookWithDelta)
         });
 
-        vm.expectRevert(
-            abi.encodeWithSelector(FewV4ShellHook.LpHookReturnsDeltaUnsupported.selector, hookWithDelta)
-        );
+        vm.expectRevert(abi.encodeWithSelector(FewV4ShellHook.LpHookReturnsDeltaUnsupported.selector, hookWithDelta));
         hook.setLpPool(shellKey, badHookLpKey);
     }
 
@@ -1203,9 +1201,7 @@ contract FewV4ShellHookTest is Test {
         try swapRouter.swap(
             shellKey,
             SwapParams({
-                zeroForOne: true,
-                amountSpecified: -int256(tooLarge),
-                sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
+                zeroForOne: true, amountSpecified: -int256(tooLarge), sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
             }),
             settings,
             bytes("")
@@ -1305,9 +1301,7 @@ contract FewV4ShellHookTest is Test {
         BalanceDelta delta = swapRouter.swap{value: swapAmount}(
             ethShellKey,
             SwapParams({
-                zeroForOne: true,
-                amountSpecified: -int256(swapAmount),
-                sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
+                zeroForOne: true, amountSpecified: -int256(swapAmount), sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
             }),
             settings,
             bytes("")
@@ -1347,9 +1341,7 @@ contract FewV4ShellHookTest is Test {
         BalanceDelta delta = swapRouter.swap(
             ethShellKey,
             SwapParams({
-                zeroForOne: false,
-                amountSpecified: -int256(swapAmount),
-                sqrtPriceLimitX96: TickMath.MAX_SQRT_PRICE - 1
+                zeroForOne: false, amountSpecified: -int256(swapAmount), sqrtPriceLimitX96: TickMath.MAX_SQRT_PRICE - 1
             }),
             settings,
             bytes("")
