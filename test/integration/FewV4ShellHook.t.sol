@@ -787,6 +787,22 @@ contract FewV4ShellHookTest is Test {
         hook.setLpPool(shellKey, emptyKey);
     }
 
+    function test_setLpPool_revertsWhenHookHasBeforeSwapReturnDelta() public {
+        address hookWithDelta = address(uint160(Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG));
+        PoolKey memory badHookLpKey = PoolKey({
+            currency0: lpKey.currency0,
+            currency1: lpKey.currency1,
+            fee: lpKey.fee,
+            tickSpacing: lpKey.tickSpacing,
+            hooks: IHooks(hookWithDelta)
+        });
+
+        vm.expectRevert(
+            abi.encodeWithSelector(FewV4ShellHook.LpHookReturnsDeltaUnsupported.selector, hookWithDelta)
+        );
+        hook.setLpPool(shellKey, badHookLpKey);
+    }
+
     function test_registeredLpPoolUsesRegisteredFee() public {
         // Register an lp pool with a DIFFERENT fee than the shell pool to confirm the registered
         // fee/tickSpacing is used (not the shell pool's).
