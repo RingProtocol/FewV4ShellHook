@@ -71,6 +71,7 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
     error LpInsufficientInventory(address token, uint256 available, uint256 required);
     error ShellPoolNotInitialized(PoolId shellPoolId);
     error QuoteAmountTooLarge(uint256 amount, uint256 max);
+    error InvalidAmount();
 
     event LpSwap(
         PoolId indexed shellPoolId,
