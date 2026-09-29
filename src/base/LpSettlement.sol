@@ -97,7 +97,7 @@ abstract contract LpSettlement is DeltaResolver {
     function _approveAndWrap(address underlying, address fewToken, uint256 amount) internal {
         IERC20(underlying).forceApprove(fewToken, amount);
         uint256 returnedAmount = IFewWrappedToken(fewToken).wrap(amount);
-        IERC20(underlying).forceApprove(fewToken, 0);
+        // wrap() pulls exactly `amount` via transferFrom, so the allowance is consumed back to 0.
         if (returnedAmount != amount) revert WrapReturnMismatch(returnedAmount, amount);
     }
 
