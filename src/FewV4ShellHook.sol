@@ -281,9 +281,12 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
         }
 
         // Post-swap check: the few token contract must hold enough underlying origin token to
-        // fulfill the unwrap. This is independent of PoolManager's balance.
+        // fulfill the unwrap. This is independent of PoolManager's balance. The wrapper's
+        // underlying was already validated during route derivation: it is the shell pool's
+        // output token, with native ETH (address(0)) mapping to WETH.
         address fewOut = params.zeroForOne ? route.few1 : route.few0;
-        address outputUnderlying = IFewWrappedToken(fewOut).token();
+        address outputUnderlying = params.zeroForOne ? route.token1 : route.token0;
+        if (outputUnderlying == address(0)) outputUnderlying = address(weth);
         uint256 availableUnderlying = IERC20(outputUnderlying).balanceOf(fewOut);
         if (availableUnderlying < amountOut) {
             revert LpInsufficientInventory(fewOut, availableUnderlying, amountOut);
