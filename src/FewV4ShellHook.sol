@@ -148,7 +148,7 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyLock, IAgg
     // Registration deliberately validates initialization, hook flags, canonical wrappers and
     // currency order in one bounded admin path.
     // slither-disable-next-line cyclomatic-complexity
-    function setLpPool(PoolKey calldata shellPoolKey, PoolKey calldata lpPoolKey) external onlyOwner {
+    function setLpPool(PoolKey calldata shellPoolKey, PoolKey calldata lpPoolKey) public virtual onlyOwner {
         PoolId shellPoolId = shellPoolKey.toId();
         if (address(initedPools[shellPoolId].hooks) == address(0)) revert ShellPoolNotInitialized(shellPoolId);
 
@@ -457,7 +457,7 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyLock, IAgg
 
     /// @dev Verifies the PoolManager holds enough origin token to fulfill the flash conversion
     ///      input leg. Reusing LpInsufficientInventory for a consistent error surface.
-    function _requireSettlementInventory(address token, uint256 amount) internal view {
+    function _requireSettlementInventory(address token, uint256 amount) internal view virtual {
         uint256 available =
             token == address(0) ? address(poolManager).balance : IERC20(token).balanceOf(address(poolManager));
         if (available < amount) revert LpInsufficientInventory(token, available, amount);
