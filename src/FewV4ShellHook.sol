@@ -2,7 +2,6 @@
 pragma solidity 0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
@@ -19,6 +18,7 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 
 import {BaseHook} from "v4-periphery/src/utils/BaseHook.sol";
+import {ReentrancyLock} from "v4-periphery/src/base/ReentrancyLock.sol";
 import {IWETH9} from "v4-periphery/src/interfaces/external/IWETH9.sol";
 import {IV4Quoter} from "v4-periphery/src/interfaces/IV4Quoter.sol";
 
@@ -54,7 +54,7 @@ import {LpOwner} from "./base/LpOwner.sol";
 ///      - exact-input and exact-output requests must fill completely or the whole transaction reverts;
 ///      - the PoolManager must already hold enough physical origin input for the atomic flash conversion
 ///        when the lp route is chosen.
-contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAggregatorHook {
+contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyLock, IAggregatorHook {
     using CurrencyLibrary for Currency;
     using FullMath for uint256;
     using LpRouteLib for LpRouteLib.LpRoute;
@@ -252,7 +252,7 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
     )
         internal
         override
-        nonReentrant
+        isNotLocked
         returns (bytes4, BeforeSwapDelta, uint24)
     {
         _validateAmount(params.amountSpecified);
