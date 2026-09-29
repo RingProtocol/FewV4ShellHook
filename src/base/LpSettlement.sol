@@ -45,25 +45,24 @@ abstract contract LpSettlement is DeltaResolver {
         uint256 inputBaseline = input.balanceOfSelf();
         uint256 fewInBaseline = IERC20(fewIn).balanceOf(address(this));
         _take(input, address(this), amountIn);
-        _wrapExact(input, fewIn, amountIn);
+        _wrapExact(input, fewIn, amountIn, inputBaseline + amountIn, fewInBaseline);
         _settleExact(Currency.wrap(fewIn), amountIn);
-        _requireBalance(input, inputBaseline);
         _requireBalance(Currency.wrap(fewIn), fewInBaseline);
 
         // Output leg: take fewToken from PoolManager, unwrap to origin, settle origin for caller.
         uint256 outputBaseline = output.balanceOfSelf();
         uint256 fewOutBaseline = IERC20(fewOut).balanceOf(address(this));
         _take(Currency.wrap(fewOut), address(this), amountOut);
-        _unwrapExact(fewOut, output, amountOut);
+        _unwrapExact(fewOut, output, amountOut, fewOutBaseline + amountOut, outputBaseline);
         _settleExact(output, amountOut);
-        _requireBalance(Currency.wrap(fewOut), fewOutBaseline);
         _requireBalance(output, outputBaseline);
     }
 
-    function _wrapExact(Currency input, address fewToken, uint256 amount) internal {
-        uint256 inputBefore = input.balanceOfSelf();
-        uint256 fewBefore = IERC20(fewToken).balanceOf(address(this));
-
+    /// @dev `inputBefore`/`fewBefore` are the caller-measured balances after `_take`; re-reading them
+    ///      here would duplicate the external calls.
+    function _wrapExact(Currency input, address fewToken, uint256 amount, uint256 inputBefore, uint256 fewBefore)
+        internal
+    {
         if (input.isAddressZero()) {
             uint256 wethBefore = IERC20(address(_weth)).balanceOf(address(this));
             _weth.deposit{value: amount}();
@@ -78,9 +77,9 @@ abstract contract LpSettlement is DeltaResolver {
         _requireBalance(Currency.wrap(fewToken), fewBefore + amount);
     }
 
-    function _unwrapExact(address fewToken, Currency output, uint256 amount) internal {
-        uint256 fewBefore = IERC20(fewToken).balanceOf(address(this));
-        uint256 outputBefore = output.balanceOfSelf();
+    function _unwrapExact(address fewToken, Currency output, uint256 amount, uint256 fewBefore, uint256 outputBefore)
+        internal
+    {
         uint256 wethBefore = output.isAddressZero() ? IERC20(address(_weth)).balanceOf(address(this)) : 0;
 
         uint256 returnedAmount = IFewWrappedToken(fewToken).unwrap(amount);
