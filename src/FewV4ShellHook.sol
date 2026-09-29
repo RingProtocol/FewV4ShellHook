@@ -180,7 +180,7 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
         PoolKey memory shellKey = initedPools[poolId];
         if (address(shellKey.hooks) == address(0)) revert ShellPoolNotInitialized(poolId);
 
-        LpRouteLib.LpRoute memory route = _deriveLpRoute(shellKey);
+        LpRouteLib.LpRoute memory route = _deriveLpRoute(shellKey, poolId);
         if (!route.available) revert LpRouteUnavailable();
 
         if (amountSpecified < 0) {
@@ -208,7 +208,7 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
         PoolKey memory shellKey = initedPools[poolId];
         if (address(shellKey.hooks) == address(0)) revert ShellPoolNotInitialized(poolId);
 
-        LpRouteLib.LpRoute memory route = _deriveLpRoute(shellKey);
+        LpRouteLib.LpRoute memory route = _deriveLpRoute(shellKey, poolId);
         if (!route.available) return (0, 0);
 
         (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(route.lpPoolId);
@@ -259,7 +259,7 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
         PoolId shellPoolId = key.toId();
 
         // lp is the only execution venue. If no route is available, revert.
-        LpRouteLib.LpRoute memory route = _deriveLpRoute(key);
+        LpRouteLib.LpRoute memory route = _deriveLpRoute(key, shellPoolId);
         if (!route.available) revert LpRouteUnavailable();
 
         bool lpZeroForOne = params.zeroForOne == route.orderAligned;
@@ -308,7 +308,11 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
     // lp route derivation
     // ---------------------------------------------------------------------
 
-    function _deriveLpRoute(PoolKey memory key) internal view returns (LpRouteLib.LpRoute memory route) {
+    function _deriveLpRoute(PoolKey memory key, PoolId shellPoolId)
+        internal
+        view
+        returns (LpRouteLib.LpRoute memory route)
+    {
         address token0 = Currency.unwrap(key.currency0);
         address token1 = Currency.unwrap(key.currency1);
 
@@ -320,7 +324,7 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyGuard, IAg
         if (key.fee.isDynamicFee()) revert LpRouteUnavailable();
 
         // 1. Owner-registered lp pool is the only source for the lp route.
-        LpPool memory registered = lpPools[key.toId()];
+        LpPool memory registered = lpPools[shellPoolId];
         if (registered.set) {
             PoolKey memory lpKey = registered.lpPoolKey;
             bool orderAligned = registered.orderAligned;
