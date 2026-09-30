@@ -99,10 +99,17 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyLock, IAgg
     /// @notice Enumerable list of all shell pool PoolIds that have been initialized through this hook.
     PoolId[] public initedPoolIds;
 
+    /// @notice Pre-computed registered lp pool data so the swap hot path does not need to
+    ///         recompute PoolKey, PoolId or re-unwrap wrapper addresses.
     struct LpPool {
-        PoolKey lpPoolKey;
+        PoolId lpPoolId;
+        IHooks hooks;
+        uint24 fee;
+        int24 tickSpacing;
         bool orderAligned;
         bool set;
+        address few0; // wrapper for shell pool's token0
+        address few1; // wrapper for shell pool's token1
     }
 
     constructor(IPoolManager _poolManager, IFewFactory _fewFactory, IWETH9 _weth, IV4Quoter _v4Quoter, address _owner)
@@ -159,7 +166,21 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyLock, IAgg
             revert WrapperUnderlyingMismatch(few0, shellLookup0, underlying0);
         }
 
-        lpPools[shellPoolId] = LpPool({lpPoolKey: lpPoolKey, orderAligned: orderAligned, set: true});
+        // Pre-compute and store everything the swap hot path needs. few0/few1 always wrap
+        // shellPoolKey.currency0/currency1 respectively; orderAligned tracks whether that
+        // matches the lp pool's currency0/currency1 order.
+        address regFew0 = orderAligned ? few0 : few1;
+        address regFew1 = orderAligned ? few1 : few0;
+        lpPools[shellPoolId] = LpPool({
+            few0: regFew0,
+            few1: regFew1,
+            hooks: lpPoolKey.hooks,
+            lpPoolId: lpPoolKey.toId(),
+            fee: lpPoolKey.fee,
+            tickSpacing: lpPoolKey.tickSpacing,
+            orderAligned: orderAligned,
+            set: true
+        });
         emit LpPoolSet(shellPoolId, lpPoolKey);
     }
 
@@ -341,14 +362,18 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyLock, IAgg
         // 1. Owner-registered lp pool is the only source for the lp route.
         LpPool memory registered = lpPools[shellPoolId];
         if (registered.set) {
-            PoolKey memory lpKey = registered.lpPoolKey;
-            bool orderAligned = registered.orderAligned;
-            // few0/few1 in the route always wrap shell token0/token1 respectively.
-            address regFew0 = Currency.unwrap(orderAligned ? lpKey.currency0 : lpKey.currency1);
-            address regFew1 = Currency.unwrap(orderAligned ? lpKey.currency1 : lpKey.currency0);
-            return LpRouteLib.buildRoute(
-                poolManager, token0, token1, regFew0, regFew1, lpKey.fee, lpKey.tickSpacing, lpKey.hooks, orderAligned
-            );
+            return LpRouteLib.LpRoute({
+                token0: token0,
+                token1: token1,
+                few0: registered.few0,
+                few1: registered.few1,
+                fee: registered.fee,
+                tickSpacing: registered.tickSpacing,
+                hooks: registered.hooks,
+                lpPoolId: registered.lpPoolId,
+                orderAligned: registered.orderAligned,
+                available: poolManager.getLiquidity(registered.lpPoolId) > 0
+            });
         }
 
         // 2. Fall back to FewFactory auto-inference, reusing the shell pool's fee and tick spacing.
