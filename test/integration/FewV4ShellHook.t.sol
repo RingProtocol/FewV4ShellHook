@@ -1475,6 +1475,60 @@ contract FewV4ShellHookTest is Test {
         assertTrue(amount0After != amount0Before || amount1After != amount1Before, "pseudo TVL changed after swap");
     }
 
+    function test_pseudoTvl_cappedByWrapperBacking() public {
+        manager.initialize(lpKey, _lpPriceForBetterZeroForOne());
+        _addLpLiquidity(LP_LIQUIDITY);
+
+        // Drain the few0 wrapper's underlying so its backing is below the lp pool's virtual depth.
+        // route.few0 always wraps shell currency0, so this caps amount0 in shell order.
+        address few0 = factory.getWrappedToken(Currency.unwrap(currency0));
+        address underlying0 = IFewWrappedToken(few0).token();
+        uint256 backing = IERC20(underlying0).balanceOf(few0);
+        uint256 smallBacking = 1e18;
+        vm.prank(few0);
+        IERC20(underlying0).transfer(address(0xdead), backing - smallBacking);
+
+        (uint256 amount0, uint256 amount1) = hook.pseudoTotalValueLocked(shellKey.toId());
+
+        assertEq(amount0, smallBacking, "amount0 capped by wrapper backing");
+        assertGt(amount1, 0, "amount1 unaffected by few0 backing");
+    }
+
+    function test_pseudoTvl_cappedBySettlementInventory() public {
+        manager.initialize(lpKey, _lpPriceForBetterZeroForOne());
+        _addLpLiquidity(LP_LIQUIDITY);
+
+        // Drain PoolManager's currency0 balance so settlement inventory is the binding constraint.
+        address token0 = Currency.unwrap(currency0);
+        uint256 managerBal = IERC20(token0).balanceOf(address(manager));
+        uint256 smallInventory = 2e18;
+        vm.prank(address(manager));
+        IERC20(token0).transfer(address(0xdead), managerBal - smallInventory);
+
+        (uint256 amount0, uint256 amount1) = hook.pseudoTotalValueLocked(shellKey.toId());
+
+        assertEq(amount0, smallInventory, "amount0 capped by settlement inventory");
+        assertGt(amount1, 0, "amount1 unaffected by currency0 settlement");
+    }
+
+    function test_pseudoTvl_returnsZeroSideWhenWrapperBackingZero() public {
+        manager.initialize(lpKey, _lpPriceForBetterZeroForOne());
+        _addLpLiquidity(LP_LIQUIDITY);
+
+        // Fully drain the few1 wrapper's underlying: the shell-side amount1 reports zero even
+        // though the lp pool has virtual depth on that side.
+        address few1 = factory.getWrappedToken(Currency.unwrap(currency1));
+        address underlying1 = IFewWrappedToken(few1).token();
+        uint256 backing = IERC20(underlying1).balanceOf(few1);
+        vm.prank(few1);
+        IERC20(underlying1).transfer(address(0xdead), backing);
+
+        (uint256 amount0, uint256 amount1) = hook.pseudoTotalValueLocked(shellKey.toId());
+
+        assertGt(amount0, 0, "amount0 unaffected by few1 backing");
+        assertEq(amount1, 0, "amount1 is zero when few1 has no backing");
+    }
+
     // ---------------------------------------------------------------------
     // _beforeSwap uint128 guard
     // ---------------------------------------------------------------------
