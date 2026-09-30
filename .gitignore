@@ -3,3 +3,8 @@
 /out/
 /.env
 /.env.*
+out_soldb
+.vscode
+testresult
+
+
