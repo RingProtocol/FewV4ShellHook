@@ -722,7 +722,7 @@ contract FewV4ShellHookTest is Test {
 
         vm.prank(newOwner);
         hook.setLpPool(shellKey, lpKey);
-        (,, bool isSet) = hook.lpPools(shellKey.toId());
+        (,,,,, bool isSet,,) = hook.lpPools(shellKey.toId());
         assertTrue(isSet, "new owner registered");
     }
 
@@ -735,12 +735,24 @@ contract FewV4ShellHookTest is Test {
         emit FewV4ShellHook.LpPoolSet(shellKey.toId(), lpKey);
         hook.setLpPool(shellKey, lpKey);
 
-        (PoolKey memory rKey,, bool rSet) = hook.lpPools(shellKey.toId());
+        (
+            PoolId _lpPoolId,
+            IHooks _hooks,
+            uint24 _fee,
+            int24 _tickSpacing,
+            bool _orderAligned,
+            bool rSet,
+            address _few0,
+            address _few1
+        ) = hook.lpPools(shellKey.toId());
         assertTrue(rSet, "registered");
-        assertEq(Currency.unwrap(rKey.currency0), Currency.unwrap(lpKey.currency0), "currency0");
-        assertEq(Currency.unwrap(rKey.currency1), Currency.unwrap(lpKey.currency1), "currency1");
-        assertEq(rKey.fee, lpKey.fee, "fee");
-        assertEq(rKey.tickSpacing, lpKey.tickSpacing, "tickSpacing");
+        assertEq(_orderAligned, orderAligned, "orderAligned");
+        assertEq(_few0, Currency.unwrap(orderAligned ? lpKey.currency0 : lpKey.currency1), "few0");
+        assertEq(_few1, Currency.unwrap(orderAligned ? lpKey.currency1 : lpKey.currency0), "few1");
+        assertEq(PoolId.unwrap(_lpPoolId), PoolId.unwrap(lpKey.toId()), "lpPoolId");
+        assertEq(_fee, lpKey.fee, "fee");
+        assertEq(_tickSpacing, lpKey.tickSpacing, "tickSpacing");
+        assertEq(address(_hooks), address(lpKey.hooks), "hooks");
     }
 
     function test_setLpPool_revertsForNonOwner() public {
@@ -754,7 +766,7 @@ contract FewV4ShellHookTest is Test {
     function test_setLpPool_emptyKeyRemovesRegistration() public {
         // Register first.
         hook.setLpPool(shellKey, lpKey);
-        (,, bool isSet) = hook.lpPools(shellKey.toId());
+        (,,,,, bool isSet,,) = hook.lpPools(shellKey.toId());
         assertTrue(isSet, "registered");
 
         // Empty lpPoolKey (currency0 == address(0)) removes the registration.
@@ -770,7 +782,7 @@ contract FewV4ShellHookTest is Test {
         emit FewV4ShellHook.LpPoolRemoved(shellKey.toId());
         hook.setLpPool(shellKey, emptyKey);
 
-        (,, bool rSet) = hook.lpPools(shellKey.toId());
+        (,,,,, bool rSet,,) = hook.lpPools(shellKey.toId());
         assertFalse(rSet, "removed");
     }
 
