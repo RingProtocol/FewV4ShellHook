@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-pragma solidity 0.8.26;
+pragma solidity ^0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
@@ -201,7 +201,8 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyLock, IAgg
     }
 
     /// @notice Returns a liquidity-depth proxy for the shell pool, expressed in the shell pool's currency
-    ///         order. Reads the lp pool's sqrtPriceX96 and active liquidity and computes virtual amounts.
+    ///         order. Reads the lp pool's sqrtPriceX96 and active liquidity and computes virtual amounts,
+    ///         then caps each side by its FewToken wrapper backing and PoolManager settlement inventory.
     /// @dev This is an active-liquidity depth proxy, not accounting TVL. Returns (0, 0) if the lp pool
     ///      is unavailable, uninitialized, or has no active liquidity.
     function pseudoTotalValueLocked(PoolId poolId) external override returns (uint256 amount0, uint256 amount1) {
@@ -217,7 +218,21 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyLock, IAgg
 
         uint256 virtual0 = FullMath.mulDiv(uint256(liquidity), 1 << 96, sqrtPriceX96);
         uint256 virtual1 = FullMath.mulDiv(uint256(liquidity), sqrtPriceX96, 1 << 96);
-        return route.orderAligned ? (virtual0, virtual1) : (virtual1, virtual0);
+        (amount0, amount1) = route.orderAligned ? (virtual0, virtual1) : (virtual1, virtual0);
+
+        // Cap by FewToken wrapper backing: the wrapper must physically hold enough underlying
+        // for the unwrap leg of any swap routed through this shell pool.
+        uint256 backing0 = _wrapperBacking(route.few0);
+        uint256 backing1 = _wrapperBacking(route.few1);
+        if (amount0 > backing0) amount0 = backing0;
+        if (amount1 > backing1) amount1 = backing1;
+
+        // Cap by PoolManager settlement inventory: the hook flash-takes origin input from
+        // PoolManager, so the physical token balance is the hard ceiling on executable depth.
+        uint256 settlement0 = _settlementBalance(route.token0);
+        uint256 settlement1 = _settlementBalance(route.token1);
+        if (amount0 > settlement0) amount0 = settlement0;
+        if (amount1 > settlement1) amount1 = settlement1;
     }
 
     /// @dev Required to receive native ETH from PoolManager.take() and WETH9.withdraw().
@@ -388,5 +403,19 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyLock, IAgg
         if (amount == 0 || amount < -int256(type(int128).max) || amount > int256(type(int128).max)) {
             revert InvalidAmount();
         }
+    }
+
+    /// @dev Returns the physical underlying balance held by a FewToken wrapper. For native ETH
+    ///      the wrapper's underlying is WETH; the balance reflects redeemable 1:1 unwrap capacity.
+    function _wrapperBacking(address fewToken) internal view returns (uint256) {
+        address underlying = IFewWrappedToken(fewToken).token();
+        return IERC20(underlying).balanceOf(fewToken);
+    }
+
+    /// @dev Returns the physical balance of `token` held by the PoolManager. For native ETH
+    ///      (address(0)) returns the PoolManager's ETH balance. This is the singleton balance,
+    ///      not reserved for any particular pool.
+    function _settlementBalance(address token) internal view returns (uint256) {
+        return token == address(0) ? address(poolManager).balance : IERC20(token).balanceOf(address(poolManager));
     }
 }
