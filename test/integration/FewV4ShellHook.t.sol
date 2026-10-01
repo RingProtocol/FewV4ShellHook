@@ -459,6 +459,44 @@ contract FewV4ShellHookTest is Test {
         assertEq(IERC20(fewB).balanceOf(address(hook)), 0, "hook fewB balance");
     }
 
+    function test_lpRoute_allowanceZeroAfterSwap_zeroForOne() public {
+        manager.initialize(lpKey, _lpPriceForBetterZeroForOne());
+        _addCurLiquidity(1e18);
+        _addLpLiquidity(LP_LIQUIDITY);
+
+        _swapAsUser(true, -int256(SWAP_AMOUNT));
+
+        assertEq(IERC20(address(tokenA)).allowance(address(hook), fewA), 0, "tokenA-fewA allowance");
+        assertEq(IERC20(address(tokenB)).allowance(address(hook), fewB), 0, "tokenB-fewB allowance");
+    }
+
+    function test_lpRoute_allowanceZeroAfterSwap_oneForZero() public {
+        manager.initialize(lpKey, _lpPriceForBetterOneForZero());
+        _addCurLiquidity(1e18);
+        _addLpLiquidity(LP_LIQUIDITY);
+
+        _swapAsUser(false, -int256(SWAP_AMOUNT));
+
+        assertEq(IERC20(address(tokenA)).allowance(address(hook), fewA), 0, "tokenA-fewA allowance");
+        assertEq(IERC20(address(tokenB)).allowance(address(hook), fewB), 0, "tokenB-fewB allowance");
+    }
+
+    function test_residualAllowanceWouldLetWrapperDrainUnderlying() public {
+        address attacker = makeAddr("attacker");
+        uint256 amount = 1e18;
+        tokenA.mint(address(hook), amount);
+
+        // Simulate a hypothetical bug where the hook left a non-zero allowance to its wrapper.
+        vm.prank(address(hook));
+        tokenA.approve(fewA, amount);
+
+        // The wrapper (or anyone acting with its approval slot) can pull hook's underlying.
+        vm.prank(fewA);
+        IERC20(address(tokenA)).transferFrom(address(hook), attacker, amount);
+
+        assertEq(IERC20(address(tokenA)).balanceOf(attacker), amount, "attacker drained underlying");
+    }
+
     function test_lpDeeperButTooShallowRevertsOnPartialFill() public {
         // lp is strictly deeper than shell but still too shallow for the requested amount.
         // The lp swap cannot fill completely, so the whole transaction reverts.
