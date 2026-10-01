@@ -78,8 +78,6 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyLock, IAgg
         PoolId indexed lpPoolId,
         address indexed sender,
         bool zeroForOne,
-        bool usedLp,
-        int256 amountSpecified,
         uint256 amountIn,
         uint256 amountOut
     );
@@ -333,9 +331,7 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyLock, IAgg
         int128 specifiedDelta = (-params.amountSpecified).toInt128();
         int128 unspecifiedDelta = params.amountSpecified < 0 ? -amountOut.toInt128() : amountIn.toInt128();
 
-        emit LpSwap(
-            shellPoolId, route.lpPoolId, sender, params.zeroForOne, true, params.amountSpecified, amountIn, amountOut
-        );
+        emit LpSwap(shellPoolId, route.lpPoolId, sender, params.zeroForOne, amountIn, amountOut);
 
         return (IHooks.beforeSwap.selector, toBeforeSwapDelta(specifiedDelta, unspecifiedDelta), 0);
     }
