@@ -131,7 +131,7 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyLock, IAgg
     ///         respectively (in either order). The `lpPoolKey.hooks` is preserved, so a hooked lp
     ///         pool may be registered. Passing an empty `lpPoolKey` (currency0 == address(0))
     ///         removes the registration, causing the hook to fall back to FewFactory auto-inference.
-    function setLpPool(PoolKey calldata shellPoolKey, PoolKey calldata lpPoolKey) external onlyOwner {
+    function setLpPool(PoolKey calldata shellPoolKey, PoolKey calldata lpPoolKey) public virtual onlyOwner {
         PoolId shellPoolId = shellPoolKey.toId();
         if (address(initedPools[shellPoolId].hooks) == address(0)) revert ShellPoolNotInitialized(shellPoolId);
 
@@ -413,7 +413,7 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyLock, IAgg
 
     /// @dev Verifies the PoolManager holds enough origin token to fulfill the flash conversion
     ///      input leg. Reusing LpInsufficientInventory for a consistent error surface.
-    function _requireSettlementInventory(address token, uint256 amount) internal view {
+    function _requireSettlementInventory(address token, uint256 amount) internal view virtual {
         uint256 available =
             token == address(0) ? address(poolManager).balance : IERC20(token).balanceOf(address(poolManager));
         if (available < amount) revert LpInsufficientInventory(token, available, amount);

@@ -35,7 +35,7 @@ abstract contract LpSettlement is DeltaResolver {
         bool shellZeroForOne,
         uint256 amountIn,
         uint256 amountOut
-    ) internal {
+    ) internal virtual {
         Currency input = Currency.wrap(shellZeroForOne ? route.token0 : route.token1);
         Currency output = Currency.wrap(shellZeroForOne ? route.token1 : route.token0);
         address fewIn = shellZeroForOne ? route.few0 : route.few1;
