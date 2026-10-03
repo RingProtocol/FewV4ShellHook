@@ -10,6 +10,12 @@ interface IFewWrappedToken {
     /// @notice Pulls `amount` of the underlying from caller, mints `amount` fewToken to caller.
     function wrap(uint256 amount) external returns (uint256);
 
+    /// @notice Pulls `amount` of the underlying from caller, mints `amount` fewToken to `to`.
+    function wrapTo(uint256 amount, address to) external returns (uint256);
+
     /// @notice Burns `amount` fewToken from caller, sends `amount` underlying to caller.
     function unwrap(uint256 amount) external returns (uint256);
+
+    /// @notice Burns `amount` fewToken from caller, sends `amount` underlying to `to`.
+    function unwrapTo(uint256 amount, address to) external returns (uint256);
 }

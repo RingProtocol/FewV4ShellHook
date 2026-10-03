@@ -1,5 +1,5 @@
-# Security status
+# Security policy
 
-This repository is an unaudited pre-production prototype. Do not deploy, fund, or route production swaps through it.
+This repository contains an unaudited release candidate. Local tests and fork simulations do not replace an independent audit. Use capped canary liquidity until the review and acceptance gates in [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md) are complete.
 
-Security reports should be sent privately through Ring Protocol's normal security contact. Do not include private keys, RPC credentials, API keys, or other secrets in an issue.
+Report security issues privately through Ring Protocol's established security contact. Do not open a public issue for an unpatched vulnerability, and never include private keys, RPC credentials, API keys or other secrets.

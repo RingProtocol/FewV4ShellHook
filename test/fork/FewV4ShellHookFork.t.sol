@@ -108,7 +108,7 @@ contract FewV4ShellHookForkTest is Test {
     function setUp() public {
         string memory rpc = vm.envOr("ETH_RPC_URL", string(""));
         if (bytes(rpc).length == 0) return;
-        vm.createSelectFork(rpc, FORK_BLOCK);
+        vm.createSelectFork(rpc, vm.envOr("TEST_FORK_BLOCK", FORK_BLOCK));
         forked = true;
 
         manager = IPoolManager(V4_POOL_MANAGER);

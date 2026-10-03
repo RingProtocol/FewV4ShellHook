@@ -1,51 +1,62 @@
-# FewToken v4 Shell Pool
+# Architecture
 
-Updated: 2026-09-16. PR #10 is based on `optimize@3e100adc09ed277c97e6f61954a50a2a574afc8c`, after PR #9 merged. Its deployed bytecode, external audit and production routing have not been verified. Older deployment or test statements do not certify this candidate.
+Updated: 2026-10-03
 
-## Execution and fees
+## Purpose
 
-An origin-token A/B shell routes all swaps through its configured FewToken fwA/fwB v4 LP pool. The inner swap creates the input/output deltas; the hook takes origin input from PoolManager, wraps and settles the FewToken input, takes the FewToken output, unwraps it and settles origin output. The returned before-swap delta consumes the entire shell request. The shell never becomes the fallback execution venue.
+FewToken liquidity can be useful without asking an origin-token user to wrap or unwrap manually. A Shell Pool exposes the origin pair in Uniswap; every accepted swap is converted and executed in one owner-approved FewToken LP.
 
-All swap execution and LP fees remain in the internal LP pool. The hook adds no fee. Shell LP is permissionless and does not earn fees from these redirected swaps; it supplies origin inventory to the shared PoolManager. Its position holder can remove it through v4 core.
+The Hook uses Uniswap v4 custom accounting. It returns the complete Shell swap delta from `beforeSwap`, so the Shell Pool price curve and LP fee are not used. The FewToken LP is the only execution venue.
 
-## Routing and settlement behavior
+## Swap flow
 
-| Property | Behavior |
+1. The router starts a swap in an origin-token Shell Pool.
+2. The Hook resolves the Shell PoolId to one explicitly registered FewToken LP.
+3. The Hook executes the nested FewToken LP swap first. PoolManager's flash accounting records the resulting input debt and output credit; physical settlement follows within the same transaction.
+4. The Hook takes the required origin input from PoolManager.
+5. `wrapTo` mints the input FewToken directly to PoolManager and settles the input debt.
+6. The Hook takes the output FewToken, then `unwrapTo` sends the origin output directly to PoolManager. Native ETH uses WETH as the wrapper underlying and is withdrawn before settlement.
+7. The Hook returns the full input/output delta. The Shell Pool price remains unchanged; the FewToken LP price moves normally.
+
+## Route rules
+
+| Item | Rule |
 |---|---|
-| Routes | Owner-set LP mapping, or FewFactory inference when the mapping is absent |
-| Explicit LP pool | May use a different fee/tick spacing and its own hook; the existing beforeSwapReturnDelta registration restriction remains |
-| Automatic route | FewFactory wrappers, shell fee/tick spacing, hookless LP pool |
-| LP depth | The internal pool must have active liquidity; shell liquidity is not the execution depth |
-| Native ETH | Atomic ETH/WETH/FewWETH conversion remains supported |
-| Trade types | Exact-input and exact-output; both must fill completely |
-| Caller data | `hookData` is ignored and cannot select a route; the calling router enforces deadlines and amount limits |
-| Price limits | Shell limits are mapped into the internal pool's currency order |
-| Administration | Transferable owner can set/remove LP mappings; no upgrade, sweep, added fee, or pause |
-| Permissions | `beforeInitialize`, `beforeSwap`, `beforeSwapReturnDelta` (`0x2088`) |
+| Shell Pool | Static-fee origin-token v4 pool using this Hook |
+| Shell Pool | Initialized by the owner so a third party cannot preempt the permanent metadata price |
+| FewToken LP | Explicitly registered by the owner for that Shell PoolId |
+| Wrappers | Both must be the canonical wrappers returned by the configured FewFactory |
+| LP Hook | Allowed only if it does not use `beforeSwapReturnDelta` or `afterSwapReturnDelta` |
+| Liquidity | The FewToken LP must be initialized and have active liquidity |
+| Trade types | Both directions; exact input and exact output; full fill only |
+| Route removal | Stops the route; no automatic pool fallback |
+| Duplicate route | One FewToken LP may back only one Shell Pool for the same raw origin-token pair in this Hook; ETH and WETH modes use distinct route keys |
 
-## Quote and payment order
+The Hook can serve many Shell Pools from one address. Each Shell Pool has its own registered FewToken LP. Callers and `hookData` cannot choose a different execution pool. Duplicate Shell Pools with different fee/tick metadata cannot advertise the same LP for the same origin-token pair.
 
-`quote(bool,int256,PoolId)` now calls V4Quoter with the shell key. It checks the same wrapping, backing, input inventory and full-fill conditions as a standard postpaid shell swap. Failed execution is not returned as a successful quote. Zero amounts and magnitudes above `type(int128).max` are rejected before casting.
+## Pricing and discovery
 
-The quoter's callback runs the actual shell hook, then reverts to recover the price. Inner hooks receive the shell hook as their sender in both quotes and execution, including when their fees depend on that sender. Pool state, wrapper balances, allowances and settlement writes made during that callback do not persist.
+- `quote()` simulates the complete Shell execution through the official V4Quoter.
+- `pseudoTotalValueLocked()` reports the FewToken LP's active-liquidity depth in origin-token order. It is a routing proxy, not withdrawable TVL.
+- `AggregatorPoolRegistered` records Shell Pool initialization.
+- `LpSwap` records the Shell PoolId, actual FewToken LP PoolId, direction and amounts.
 
-For a PoolManager starting with 1 input token and an order spending 10:
+The standard quote models swap before payment. A router that prepays PoolManager may execute with lower starting inventory than the quote requires, so production integration must also simulate the complete router calldata.
 
-- `SWAP -> SETTLE -> TAKE` fails the input inventory check. A standard shell quote also fails.
-- `SETTLE -> SWAP -> TAKE` can succeed after the router deposits the user's 10 tokens. No extra protocol capital is implied by this execution order.
-- The output does not come from the shell's initial output-token balance. It comes from redeeming the internal swap's FewToken output, so that wrapper must have sufficient underlying backing.
-- Native ETH and WETH balances are separate. The relevant balance is the exact shell currency in the entire shared PoolManager.
+## Administration
 
-A successful internal LP price alone cannot establish that a prepaid production transaction is executable. Integrators must simulate their complete calldata; this hook's standard `quote()` does not promise prepaid discovery when starting inventory is insufficient. Supporting postpayment with zero origin inventory requires a separate capital/settlement design and is outside this patch.
+The owner may initialize Shell Pools, register/remove routes and nominate a new owner. The nominated address must accept ownership. The contract is non-upgradeable and has no method to take fees, sweep tokens or withdraw LP positions.
 
-## Discovery and acceptance
+For production, use a Safe multisig and verify every PoolKey. Removing a mapping is the per-pair emergency stop.
 
-`pseudoTotalValueLocked` remains an active-liquidity depth proxy in shell-token units, not withdrawable TVL or a settlement limit. `AggregatorPoolRegistered` is emitted during shell initialization. `LpSwap` identifies shell and actual execution pool. PR #7's `HookSwap` ABI declaration is not an emitted fill event in this candidate.
+## Unsupported cases
 
-Uniswap must approve the actual deployment and configure its discovery/retention path. A zero-liquidity shell may need ZLCA/TVL-bypass treatment or explicit external-depth integration. None of these configurations funds a swap or guarantees a competitive quote.
+- Dynamic-fee Shell Pools.
+- LP hooks that return swap deltas.
+- Partial fills.
+- Fee-on-transfer, rebasing or otherwise non-standard origin tokens unless separately reviewed and tested.
+- A FewToken wrapper that is not canonical for the configured factory.
 
-Validation is recorded in [PR7_SETTLEMENT_FIX.md](PR7_SETTLEMENT_FIX.md). Final production acceptance requires the target shell to be discovered, the exact transaction to simulate successfully with measured gas and slippage, and a frontend fill that executes in the intended FewToken pool.
+Canonical wrapper validation proves wrapper identity, not that an arbitrary underlying token is safe.
 
-## Deployment boundary
-
-Source publication does not deploy or fund a contract. Any source change changes deployment bytecode; mine and verify a fresh compatible address for the final reviewed build. Use the owner-aware deployment script and explicitly verify its constructor inputs and owner. Existing deployment addresses do not inherit this source update.
+The constructor also requires code at PoolManager, FewFactory, WETH9 and V4Quoter, and requires V4Quoter to report the same PoolManager. Wrap and unwrap verify the exact change in wrapper backing. Unexpected direct ETH transfers revert.

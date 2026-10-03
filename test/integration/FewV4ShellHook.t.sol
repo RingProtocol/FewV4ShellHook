@@ -30,6 +30,7 @@ import {IV4Quoter} from "v4-periphery/src/interfaces/IV4Quoter.sol";
 import {FewV4ShellHook} from "../../src/FewV4ShellHook.sol";
 import {IAggregatorHook} from "../../src/interfaces/IAggregatorHook.sol";
 import {LpOwner} from "../../src/base/LpOwner.sol";
+import {LpSettlement} from "../../src/base/LpSettlement.sol";
 import {IFewFactory} from "../../src/interfaces/external/IFewFactory.sol";
 import {IFewWrappedToken} from "../../src/interfaces/external/IFewWrappedToken.sol";
 import {IWETH9} from "v4-periphery/src/interfaces/external/IWETH9.sol";
@@ -41,6 +42,7 @@ import {QuoterRevert} from "v4-periphery/src/libraries/QuoterRevert.sol";
 import {MockSenderFeeHook} from "../mocks/MockSenderFeeHook.sol";
 import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
 import {MockNoOpHook} from "../mocks/MockNoOpHook.sol";
+import {MockReentrantHook} from "../mocks/MockReentrantHook.sol";
 import {SettlementOrderRouter} from "../helpers/SettlementOrderRouter.sol";
 
 /// @notice Integration tests for FewV4ShellHook using a fresh local PoolManager and mock FewFactory.
@@ -243,6 +245,59 @@ contract FewV4ShellHookTest is Test {
         minedAddrC;
     }
 
+    function test_constructor_rejectsDependencyWithoutCode() public {
+        address fakeFactory = makeAddr("fakeFactory");
+        uint160 flags =
+            uint160(Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.BEFORE_INITIALIZE_FLAG);
+        bytes memory constructorArgs = abi.encode(
+            manager, IFewFactory(fakeFactory), IWETH9(address(weth)), IV4Quoter(address(v4Quoter)), address(this)
+        );
+        (, bytes32 salt) = HookMiner.find(address(this), flags, type(FewV4ShellHook).creationCode, constructorArgs);
+
+        vm.expectRevert(abi.encodeWithSelector(FewV4ShellHook.DependencyHasNoCode.selector, fakeFactory));
+        new FewV4ShellHook{salt: salt}(
+            manager, IFewFactory(fakeFactory), IWETH9(address(weth)), IV4Quoter(address(v4Quoter)), address(this)
+        );
+    }
+
+    function test_constructor_rejectsQuoterForDifferentPoolManager() public {
+        IPoolManager otherManager = new PoolManager(address(this));
+        V4Quoter otherQuoter = new V4Quoter(otherManager);
+        uint160 flags =
+            uint160(Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.BEFORE_INITIALIZE_FLAG);
+        bytes memory constructorArgs = abi.encode(
+            manager,
+            IFewFactory(address(factory)),
+            IWETH9(address(weth)),
+            IV4Quoter(address(otherQuoter)),
+            address(this)
+        );
+        (, bytes32 salt) = HookMiner.find(address(this), flags, type(FewV4ShellHook).creationCode, constructorArgs);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                FewV4ShellHook.QuoterPoolManagerMismatch.selector, address(manager), address(otherManager)
+            )
+        );
+        new FewV4ShellHook{salt: salt}(
+            manager,
+            IFewFactory(address(factory)),
+            IWETH9(address(weth)),
+            IV4Quoter(address(otherQuoter)),
+            address(this)
+        );
+    }
+
+    function test_receive_rejectsUnexpectedNativeSender() public {
+        vm.deal(USER, 1 ether);
+        vm.prank(USER);
+        (bool ok, bytes memory reason) = address(hook).call{value: 1 wei}("");
+
+        assertFalse(ok, "unexpected ETH accepted");
+        assertEq(bytes4(reason), FewV4ShellHook.UnexpectedNativeSender.selector);
+        assertEq(address(hook).balance, 0, "hook retained ETH");
+    }
+
     // ---------------------------------------------------------------------
     // Liquidity tests
     // ---------------------------------------------------------------------
@@ -398,7 +453,7 @@ contract FewV4ShellHookTest is Test {
         assertEq(IERC20(fewB).balanceOf(address(hook)), 0, "hook fewB balance");
     }
 
-    function test_autoRoutesToLpWhenSpotPriceBetter_zeroForOne() public {
+    function test_registeredRouteUsesLpWhenSpotPriceBetter_zeroForOne() public {
         manager.initialize(lpKey, _lpPriceForBetterZeroForOne());
         _addCurLiquidity(1e18);
         _addLpLiquidity(LP_LIQUIDITY);
@@ -414,7 +469,7 @@ contract FewV4ShellHookTest is Test {
         assertTrue(lpPriceAfter != lpPriceBefore, "lp price moved");
     }
 
-    function test_autoRoutesToLpWhenSpotPriceBetter_oneForZero() public {
+    function test_registeredRouteUsesLpWhenSpotPriceBetter_oneForZero() public {
         manager.initialize(lpKey, _lpPriceForBetterOneForZero());
         _addCurLiquidity(1e18);
         _addLpLiquidity(LP_LIQUIDITY);
@@ -430,7 +485,7 @@ contract FewV4ShellHookTest is Test {
         assertTrue(lpPriceAfter != lpPriceBefore, "lp price moved");
     }
 
-    function test_autoRoutesToLpForExactOutput() public {
+    function test_registeredRouteUsesLpForExactOutput() public {
         manager.initialize(lpKey, _lpPriceForBetterZeroForOne());
         _addCurLiquidity(1e18);
         _addLpLiquidity(LP_LIQUIDITY);
@@ -446,7 +501,7 @@ contract FewV4ShellHookTest is Test {
         assertTrue(lpPriceAfter != lpPriceBefore, "lp price moved");
     }
 
-    function test_autoLpHookBalancesZero() public {
+    function test_registeredLpHookBalancesZero() public {
         manager.initialize(lpKey, _lpPriceForBetterZeroForOne());
         _addCurLiquidity(1e18);
         _addLpLiquidity(LP_LIQUIDITY);
@@ -692,14 +747,23 @@ contract FewV4ShellHookTest is Test {
         assertEq(hook.owner(), address(this), "owner is constructor argument");
     }
 
-    function test_transferOwner_emitsAndUpdates() public {
+    function test_transferOwner_requiresAcceptance() public {
         address newOwner = makeAddr("newOwner");
 
         vm.expectEmit(true, true, false, true);
-        emit LpOwner.OwnerChanged(address(this), newOwner);
+        emit LpOwner.OwnerTransferStarted(address(this), newOwner);
         hook.transferOwner(newOwner);
 
-        assertEq(hook.owner(), newOwner, "owner updated");
+        assertEq(hook.owner(), address(this), "owner unchanged before acceptance");
+        assertEq(hook.pendingOwner(), newOwner, "pending owner recorded");
+
+        vm.expectEmit(true, true, false, true);
+        emit LpOwner.OwnerChanged(address(this), newOwner);
+        vm.prank(newOwner);
+        hook.acceptOwner();
+
+        assertEq(hook.owner(), newOwner, "owner updated after acceptance");
+        assertEq(hook.pendingOwner(), address(0), "pending owner cleared");
     }
 
     function test_transferOwner_revertsOnZeroAddress() public {
@@ -716,9 +780,22 @@ contract FewV4ShellHookTest is Test {
         hook.transferOwner(newOwner);
     }
 
+    function test_acceptOwner_revertsForNonPendingOwner() public {
+        address newOwner = makeAddr("newOwner");
+        address attacker = makeAddr("attacker");
+        hook.transferOwner(newOwner);
+
+        vm.prank(attacker);
+        vm.expectRevert(abi.encodeWithSelector(LpOwner.NotPendingOwner.selector, attacker, newOwner));
+        hook.acceptOwner();
+    }
+
     function test_transferredOwnerCanAct() public {
         address newOwner = makeAddr("newOwner");
         hook.transferOwner(newOwner);
+
+        vm.prank(newOwner);
+        hook.acceptOwner();
 
         vm.prank(newOwner);
         hook.setLpPool(shellKey, lpKey);
@@ -743,12 +820,86 @@ contract FewV4ShellHookTest is Test {
         assertEq(rKey.tickSpacing, lpKey.tickSpacing, "tickSpacing");
     }
 
+    function test_setLpPool_rejectsDuplicateRouteAcrossShellPools() public {
+        PoolKey memory anotherShell = shellKey;
+        anotherShell.fee = 3000;
+        anotherShell.tickSpacing = 60;
+        manager.initialize(anotherShell, SQRT_PRICE_1_1);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(FewV4ShellHook.LpRouteAlreadyRegistered.selector, lpKey.toId(), shellKey.toId())
+        );
+        hook.setLpPool(anotherShell, lpKey);
+    }
+
+    function test_setLpPool_removalClearsDuplicateGuard() public {
+        PoolKey memory anotherShell = shellKey;
+        anotherShell.fee = 3000;
+        anotherShell.tickSpacing = 60;
+        manager.initialize(anotherShell, SQRT_PRICE_1_1);
+
+        PoolKey memory emptyKey = PoolKey({
+            currency0: Currency.wrap(address(0)),
+            currency1: Currency.wrap(address(0)),
+            fee: 0,
+            tickSpacing: 0,
+            hooks: IHooks(address(0))
+        });
+        hook.setLpPool(shellKey, emptyKey);
+        hook.setLpPool(anotherShell, lpKey);
+
+        (,, bool oldSet) = hook.lpPools(shellKey.toId());
+        (,, bool newSet) = hook.lpPools(anotherShell.toId());
+        assertFalse(oldSet, "old shell still registered");
+        assertTrue(newSet, "new shell not registered");
+        bytes32 routeKey = keccak256(
+            abi.encode(lpKey.toId(), Currency.unwrap(anotherShell.currency0), Currency.unwrap(anotherShell.currency1))
+        );
+        assertTrue(hook.routeRegistered(routeKey), "duplicate guard missing");
+        assertEq(PoolId.unwrap(hook.shellPoolForRoute(routeKey)), PoolId.unwrap(anotherShell.toId()), "reverse route");
+    }
+
     function test_setLpPool_revertsForNonOwner() public {
         address attacker = makeAddr("attacker");
 
         vm.prank(attacker);
         vm.expectRevert(abi.encodeWithSelector(LpOwner.NotOwner.selector, attacker, address(this)));
         hook.setLpPool(shellKey, lpKey);
+    }
+
+    function test_setLpPool_rejectsNonCanonicalWrapperWithCorrectUnderlying() public {
+        address fakeFewA = address(new MockFewWrappedToken(address(tokenA)));
+        address lpOther = fewB;
+        PoolKey memory maliciousLpKey = PoolKey({
+            currency0: Currency.wrap(fakeFewA < lpOther ? fakeFewA : lpOther),
+            currency1: Currency.wrap(fakeFewA < lpOther ? lpOther : fakeFewA),
+            fee: FEE,
+            tickSpacing: TICK_SPACING,
+            hooks: IHooks(address(0))
+        });
+
+        vm.expectRevert(abi.encodeWithSelector(FewV4ShellHook.NonCanonicalWrapper.selector, fakeFewA, fewA));
+        hook.setLpPool(shellKey, maliciousLpKey);
+        assertEq(IERC20(address(tokenA)).allowance(address(hook), fakeFewA), 0, "fake wrapper allowance");
+    }
+
+    function test_setLpPool_cachesUnlimitedApprovalOnlyForCanonicalWrappers() public view {
+        assertEq(IERC20(address(tokenA)).allowance(address(hook), fewA), type(uint256).max);
+        assertEq(IERC20(address(tokenB)).allowance(address(hook), fewB), type(uint256).max);
+    }
+
+    function test_setLpPool_rejectsSwapReturnDeltaHooks() public {
+        address beforeDeltaHook = address(uint160(Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG));
+        PoolKey memory beforeKey = lpKey;
+        beforeKey.hooks = IHooks(beforeDeltaHook);
+        vm.expectRevert(abi.encodeWithSelector(FewV4ShellHook.LpHookReturnsDeltaUnsupported.selector, beforeDeltaHook));
+        hook.setLpPool(shellKey, beforeKey);
+
+        address afterDeltaHook = address(uint160(Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG));
+        PoolKey memory afterKey = lpKey;
+        afterKey.hooks = IHooks(afterDeltaHook);
+        vm.expectRevert(abi.encodeWithSelector(FewV4ShellHook.LpHookReturnsDeltaUnsupported.selector, afterDeltaHook));
+        hook.setLpPool(shellKey, afterKey);
     }
 
     function test_setLpPool_emptyKeyRemovesRegistration() public {
@@ -874,7 +1025,31 @@ contract FewV4ShellHookTest is Test {
         assertEq(output.balanceOf(USER) - outputBefore, quoted, "hooked lp quote matches execution");
     }
 
-    function test_emptyKeyRemovalFallsBackToAutoInference() public {
+    function test_registeredLpHookCannotReenterShellSwap() public {
+        uint160 reentrantFlags = uint160(Hooks.BEFORE_SWAP_FLAG);
+        bytes memory args = abi.encode(manager);
+        (address expected, bytes32 salt) =
+            HookMiner.find(address(this), reentrantFlags, type(MockReentrantHook).creationCode, args);
+        MockReentrantHook reentrant = new MockReentrantHook{salt: salt}(manager);
+        assertEq(address(reentrant), expected);
+
+        lpKey.hooks = IHooks(address(reentrant));
+        reentrant.setTarget(shellKey);
+        manager.initialize(lpKey, SQRT_PRICE_1_1);
+        hook.setLpPool(shellKey, lpKey);
+        _addLpLiquidity(LP_LIQUIDITY);
+
+        _swapAsUser(true, -int256(SWAP_AMOUNT / 100));
+
+        assertTrue(reentrant.attempted(), "inner hook did not try reentry");
+        assertTrue(reentrant.blocked(), "shell reentry was not blocked");
+        assertEq(IERC20(address(tokenA)).balanceOf(address(hook)), 0, "hook tokenA balance");
+        assertEq(IERC20(address(tokenB)).balanceOf(address(hook)), 0, "hook tokenB balance");
+        assertEq(IERC20(fewA).balanceOf(address(hook)), 0, "hook fewA balance");
+        assertEq(IERC20(fewB).balanceOf(address(hook)), 0, "hook fewB balance");
+    }
+
+    function test_emptyKeyRemovalDisablesRouteUntilReconfigured() public {
         // Register then remove via empty key.
         hook.setLpPool(shellKey, lpKey);
 
@@ -887,20 +1062,19 @@ contract FewV4ShellHookTest is Test {
         });
         hook.setLpPool(shellKey, emptyKey);
 
-        // After removal, the hook falls back to FewFactory auto-inference.
+        // Removing a route must not silently fall back to a different inferred pool.
         manager.initialize(lpKey, _lpPriceForBetterZeroForOne());
         _addCurLiquidity(1e18);
         _addLpLiquidity(LP_LIQUIDITY);
 
-        (uint160 shellPriceBefore,,,) = manager.getSlot0(shellKey.toId());
-        (uint160 lpPriceBefore,,,) = manager.getSlot0(lpKey.toId());
+        vm.expectRevert();
+        hook.quote(true, -int256(SWAP_AMOUNT), shellKey.toId());
 
+        vm.expectRevert();
         _swapAsUser(true, -int256(SWAP_AMOUNT));
 
-        (uint160 shellPriceAfter,,,) = manager.getSlot0(shellKey.toId());
-        (uint160 lpPriceAfter,,,) = manager.getSlot0(lpKey.toId());
-        assertEq(shellPriceAfter, shellPriceBefore, "shell price unchanged");
-        assertTrue(lpPriceAfter != lpPriceBefore, "auto-inferred lp price moved");
+        hook.setLpPool(shellKey, lpKey);
+        _swapAsUser(true, -int256(SWAP_AMOUNT));
     }
 
     function test_registeredLpPoolWithInvalidWrapper_revertsAtSetTime() public {
@@ -942,6 +1116,50 @@ contract FewV4ShellHookTest is Test {
         hook.setLpPool(shellKey, badLpKey);
     }
 
+    function test_wrapBackingShortfall_revertsAndRollsBack() public {
+        manager.initialize(lpKey, SQRT_PRICE_1_1);
+        _addLpLiquidity(LP_LIQUIDITY);
+
+        address originIn = Currency.unwrap(currency0);
+        address wrapperIn = factory.getWrappedToken(originIn);
+        MockFewWrappedToken(wrapperIn).setShortfalls(true, false);
+
+        uint256 managerOriginBefore = IERC20(originIn).balanceOf(address(manager));
+        uint256 managerFewBefore = IERC20(wrapperIn).balanceOf(address(manager));
+        uint256 backingBefore = IERC20(originIn).balanceOf(wrapperIn);
+        (uint160 lpPriceBefore,,,) = manager.getSlot0(lpKey.toId());
+
+        _expectLpRevertOnSwap(true, -int256(SWAP_AMOUNT / 100), LpSettlement.WrapperBackingDeltaMismatch.selector);
+
+        assertEq(IERC20(originIn).balanceOf(address(manager)), managerOriginBefore, "manager origin changed");
+        assertEq(IERC20(wrapperIn).balanceOf(address(manager)), managerFewBefore, "manager few changed");
+        assertEq(IERC20(originIn).balanceOf(wrapperIn), backingBefore, "wrapper backing changed");
+        (uint160 lpPriceAfter,,,) = manager.getSlot0(lpKey.toId());
+        assertEq(lpPriceAfter, lpPriceBefore, "lp price changed");
+    }
+
+    function test_unwrapBackingShortfall_revertsAndRollsBack() public {
+        manager.initialize(lpKey, SQRT_PRICE_1_1);
+        _addLpLiquidity(LP_LIQUIDITY);
+
+        address originOut = Currency.unwrap(currency1);
+        address wrapperOut = factory.getWrappedToken(originOut);
+        MockFewWrappedToken(wrapperOut).setShortfalls(false, true);
+
+        uint256 managerOriginBefore = IERC20(originOut).balanceOf(address(manager));
+        uint256 managerFewBefore = IERC20(wrapperOut).balanceOf(address(manager));
+        uint256 backingBefore = IERC20(originOut).balanceOf(wrapperOut);
+        (uint160 lpPriceBefore,,,) = manager.getSlot0(lpKey.toId());
+
+        _expectLpRevertOnSwap(true, -int256(SWAP_AMOUNT / 100), LpSettlement.WrapperBackingDeltaMismatch.selector);
+
+        assertEq(IERC20(originOut).balanceOf(address(manager)), managerOriginBefore, "manager origin changed");
+        assertEq(IERC20(wrapperOut).balanceOf(address(manager)), managerFewBefore, "manager few changed");
+        assertEq(IERC20(originOut).balanceOf(wrapperOut), backingBefore, "wrapper backing changed");
+        (uint160 lpPriceAfter,,,) = manager.getSlot0(lpKey.toId());
+        assertEq(lpPriceAfter, lpPriceBefore, "lp price changed");
+    }
+
     // ---------------------------------------------------------------------
     // quote tests
     // ---------------------------------------------------------------------
@@ -953,6 +1171,18 @@ contract FewV4ShellHookTest is Test {
         emit IAggregatorHook.AggregatorPoolRegistered(anotherShell.toId());
         manager.initialize(anotherShell, SQRT_PRICE_1_1);
         assertEq(hook.initedPoolCount(), 2);
+    }
+
+    function test_beforeInitialize_revertsForNonOwner() public {
+        PoolKey memory unauthorizedShell = shellKey;
+        unauthorizedShell.fee = 3000;
+
+        vm.prank(USER);
+        // PoolManager wraps hook callback failures in its ERC-7751 error envelope.
+        vm.expectRevert();
+        manager.initialize(unauthorizedShell, SQRT_PRICE_1_1);
+
+        assertEq(hook.initedPoolCount(), 1, "unauthorized pool not recorded");
     }
 
     function test_quoteRejectsInvalidAmountsWithoutTruncation() public {
@@ -1547,8 +1777,8 @@ contract FewV4ShellHookTest is Test {
 
         // Fund PoolManager: ETH for the input flash-take, fewTokens for the output flash-take.
         vm.deal(address(manager), 100 ether);
-        IERC20(fewWeth).transfer(address(manager), 100e18);
-        IERC20(fewA).transfer(address(manager), 100e18);
+        IERC20(fewWeth).safeTransfer(address(manager), 100e18);
+        IERC20(fewA).safeTransfer(address(manager), 100e18);
     }
 
     function test_nativeEthSwap_exactInput_zeroForOne() public {
@@ -1629,6 +1859,29 @@ contract FewV4ShellHookTest is Test {
         assertEq(IERC20(fewWeth).balanceOf(address(hook)), 0, "hook fewWETH");
         assertEq(IERC20(fewA).balanceOf(address(hook)), 0, "hook fewA");
         assertEq(tokenA.balanceOf(address(hook)), 0, "hook tokenA");
+    }
+
+    function test_forcedEthDust_doesNotAffectNativeSwapAccounting() public {
+        (PoolKey memory ethShellKey,,) = _setupNativeEthPool();
+
+        // Models ETH forced in through SELFDESTRUCT, which cannot be rejected by receive().
+        vm.deal(address(hook), 1 wei);
+        uint256 userEthBefore = USER.balance;
+
+        PoolSwapTest.TestSettings memory settings =
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
+        vm.prank(USER);
+        swapRouter.swap(
+            ethShellKey,
+            SwapParams({
+                zeroForOne: false, amountSpecified: -int256(SWAP_AMOUNT), sqrtPriceLimitX96: TickMath.MAX_SQRT_PRICE - 1
+            }),
+            settings,
+            bytes("")
+        );
+
+        assertGt(USER.balance, userEthBefore, "USER did not receive ETH");
+        assertEq(address(hook).balance, 1 wei, "forced ETH changed");
     }
 
     // ---------------------------------------------------------------------
@@ -1718,8 +1971,8 @@ contract FewV4ShellHookTest is Test {
         // Wrap extra to give to PoolManager.
         IFewWrappedToken(lpToken0).wrap(amount0 * 100);
         IFewWrappedToken(lpToken1).wrap(amount1 * 100);
-        IERC20(lpToken0).transfer(address(manager), amount0 * 100);
-        IERC20(lpToken1).transfer(address(manager), amount1 * 100);
+        IERC20(lpToken0).safeTransfer(address(manager), amount0 * 100);
+        IERC20(lpToken1).safeTransfer(address(manager), amount1 * 100);
 
         // Use a tick range that contains the lp pool's shellrent tick.
         // SQRT_PRICE_2_1 -> tick 6931, SQRT_PRICE_1_2 -> tick -6931, SQRT_PRICE_1_1 -> tick 0.
@@ -1755,8 +2008,8 @@ contract FewV4ShellHookTest is Test {
         // Send extra fewTokens to PoolManager for the hook's flash-take of output.
         uint256 managerReserve0 = liquidityAmount * 100;
         uint256 managerReserve1 = liquidityAmount * 100;
-        IERC20(lpToken0).transfer(address(manager), managerReserve0);
-        IERC20(lpToken1).transfer(address(manager), managerReserve1);
+        IERC20(lpToken0).safeTransfer(address(manager), managerReserve0);
+        IERC20(lpToken1).safeTransfer(address(manager), managerReserve1);
 
         // Tick bounds are multiples of tickSpacing and wide enough to cover test prices
         // (tick 6931 for SQRT_PRICE_2_1, tick -6931 for SQRT_PRICE_1_2).
