@@ -153,8 +153,8 @@ contract FewV4ShellHookMainnetTest is Test {
                     _executeAndMeasure(ethShellKey, IAggregatorHook(address(candidate)), zeroForOne, exactIn, amount);
                 emit log_named_uint("live Shell Universal Router gas", liveGas);
                 emit log_named_uint("release candidate Universal Router gas", candidateGas);
-                emit log_named_uint("saved gas", liveGas - candidateGas);
                 assertLt(candidateGas, liveGas);
+                emit log_named_uint("saved gas", liveGas - candidateGas);
                 assertTrue(vm.revertToState(snapshot));
             }
         }

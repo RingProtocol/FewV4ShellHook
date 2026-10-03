@@ -15,7 +15,7 @@ The origin-token Shell Pool is the Uniswap entry and settlement layer. The regis
 
 This branch is a new, unaudited release candidate. It is not the bytecode currently deployed at `0xadef...2088`; any source change requires a new mined Hook address, deployment, verification and Uniswap review.
 
-All 97 local and fixed-block Ethereum fork tests passed again on October 3, 2026, including 10,000 fuzz runs for quote/settlement consistency. The three Universal Router fork tests also passed in independent transaction contexts with `--isolate`. The earlier latest-state run of the 10 fork tests used Ethereum block `26,087,184` on September 30, 2026. These are engineering checks, not an independent security audit. See [Security review](docs/SECURITY_REVIEW.md).
+After integrating main on October 3, 2026, `forge test --force --json` executed all four suites: 107 passed, 0 failed and 0 skipped, including 10,000 fuzz runs for quote/settlement consistency. The three Universal Router fork tests also passed in independent transaction contexts with `--isolate`. The earlier latest-state run used Ethereum block `26,087,184` on September 30, 2026 and does not certify this updated candidate. These are engineering checks, not an independent security audit. See [Security review](docs/SECURITY_REVIEW.md).
 
 ## Why this version
 
@@ -23,10 +23,10 @@ Two gas-saving designs were compared:
 
 | Design | Result | Decision |
 |---|---:|---|
-| Direct settlement | `wrapTo`/`unwrapTo` settle directly with PoolManager; cached approvals; transient reentrancy lock | Use for the release candidate |
+| Direct settlement | `wrapTo`/`unwrapTo` settle directly with PoolManager; exact per-swap approvals; cached route fields; transient reentrancy lock | Use for the release candidate |
 | Batched netting | Keeps origin/FewToken inventory and wraps/unwraps several trades together | Keep experimental; it needs prefunded inventory, keeper settlement and per-pool accounting |
 
-At Ethereum block `26,069,215`, the release candidate saved `34,044–44,180 gas` per complete Universal Router call versus the currently deployed Shell Hook across ETH/WBTC in both directions and exact-input/exact-output modes under `--isolate`. This is call gas, not mined receipt gas. A 24-case matrix covered both ETH/WBTC and WETH/WBTC. The earlier non-isolated savings are superseded; full methodology is in [Design decision](docs/DESIGN_DECISION.md).
+After integrating current main, the exact-approval candidate saved `27,484-43,679 gas` per complete Universal Router call versus the deployed Shell Hook at Ethereum block `26,069,215`, across ETH/WBTC in both directions and exact-input/exact-output modes under `--isolate`. This is call gas, not mined receipt gas or a benchmark against current main. A 24-case matrix covered both ETH/WBTC and WETH/WBTC. Previous candidate and non-isolated estimates are superseded; full methodology is in [Design decision](docs/DESIGN_DECISION.md).
 
 ## Safety boundary
 
@@ -43,6 +43,10 @@ At Ethereum block `26,069,215`, the release candidate saved `34,044–44,180 gas
 - Ownership transfer takes two steps. Production ownership should be a Safe multisig.
 
 The owner can redirect future swaps to another valid canonical FewToken LP or stop a route. The owner cannot move wallet funds, withdraw LP positions or sweep PoolManager assets.
+
+`quote()` simulates the complete Shell swap through V4Quoter and rolls back all state changes. It models swap-before-payment. A router that pays PoolManager before swapping may execute with less starting inventory, so the complete router calldata must also be simulated. `pseudoTotalValueLocked()` caps its active-liquidity estimate by physical wrapper backing and PoolManager origin-token inventory; those singleton balances are shared, not reserved for this Shell Pool.
+
+Wrapper approvals cover only the current input amount. A nonzero remaining allowance makes the entire swap revert. Route registration does not grant standing approval.
 
 ## Build and test
 

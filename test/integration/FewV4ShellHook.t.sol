@@ -514,6 +514,101 @@ contract FewV4ShellHookTest is Test {
         assertEq(IERC20(fewB).balanceOf(address(hook)), 0, "hook fewB balance");
     }
 
+    function test_lpRoute_allowanceZeroAfterSwap_zeroForOne() public {
+        manager.initialize(lpKey, _lpPriceForBetterZeroForOne());
+        _addCurLiquidity(1e18);
+        _addLpLiquidity(LP_LIQUIDITY);
+
+        _swapAsUser(true, -int256(SWAP_AMOUNT));
+
+        assertEq(IERC20(address(tokenA)).allowance(address(hook), fewA), 0, "tokenA-fewA allowance");
+        assertEq(IERC20(address(tokenB)).allowance(address(hook), fewB), 0, "tokenB-fewB allowance");
+    }
+
+    function test_lpRoute_allowanceZeroAfterSwap_oneForZero() public {
+        manager.initialize(lpKey, _lpPriceForBetterOneForZero());
+        _addCurLiquidity(1e18);
+        _addLpLiquidity(LP_LIQUIDITY);
+
+        _swapAsUser(false, -int256(SWAP_AMOUNT));
+
+        assertEq(IERC20(address(tokenA)).allowance(address(hook), fewA), 0, "tokenA-fewA allowance");
+        assertEq(IERC20(address(tokenB)).allowance(address(hook), fewB), 0, "tokenB-fewB allowance");
+    }
+
+    function test_residualAllowanceWouldLetWrapperDrainUnderlying() public {
+        address attacker = makeAddr("attacker");
+        uint256 amount = 1e18;
+        tokenA.mint(address(hook), amount);
+
+        // Simulate a hypothetical bug where the hook left a non-zero allowance to its wrapper.
+        vm.prank(address(hook));
+        tokenA.approve(fewA, amount);
+
+        // The wrapper (or anyone acting with its approval slot) can pull hook's underlying.
+        vm.prank(fewA);
+        IERC20(address(tokenA)).safeTransferFrom(address(hook), attacker, amount);
+
+        assertEq(IERC20(address(tokenA)).balanceOf(attacker), amount, "attacker drained underlying");
+    }
+
+    function test_noAllowanceAfterSwap_allDirectionsAndTradeTypes() public {
+        manager.initialize(lpKey, SQRT_PRICE_1_1);
+        _addLpLiquidity(LP_LIQUIDITY);
+
+        for (uint256 direction; direction < 2; ++direction) {
+            for (uint256 kind; kind < 2; ++kind) {
+                uint256 snapshot = vm.snapshotState();
+                int256 amount = int256(SWAP_AMOUNT / 100);
+                _swapAsUser(direction == 0, kind == 0 ? -amount : amount);
+                assertEq(tokenA.allowance(address(hook), fewA), 0, "tokenA allowance");
+                assertEq(tokenB.allowance(address(hook), fewB), 0, "tokenB allowance");
+                assertTrue(vm.revertToState(snapshot));
+            }
+        }
+    }
+
+    function test_noStandingAllowanceProtectsUnexpectedOriginDust() public {
+        manager.initialize(lpKey, SQRT_PRICE_1_1);
+        _addLpLiquidity(LP_LIQUIDITY);
+        _swapAsUser(true, -int256(SWAP_AMOUNT / 100));
+
+        address attacker = makeAddr("attacker");
+        uint256 dust = 1e18;
+        tokenA.mint(address(hook), dust);
+        vm.prank(fewA);
+        (bool ok,) = address(tokenA).call(abi.encodeCall(tokenA.transferFrom, (address(hook), attacker, dust)));
+        assertFalse(ok, "wrapper pulled origin dust without approval");
+
+        assertEq(tokenA.balanceOf(address(hook)), dust, "origin dust moved");
+        assertEq(tokenA.balanceOf(attacker), 0, "attacker received origin dust");
+    }
+
+    function test_unconsumedAllowance_revertsAndRollsBack() public {
+        manager.initialize(lpKey, SQRT_PRICE_1_1);
+        _addLpLiquidity(LP_LIQUIDITY);
+        address originIn = Currency.unwrap(currency0);
+        address wrapperIn = factory.getWrappedToken(originIn);
+        uint256 originBefore = IERC20(originIn).balanceOf(address(manager));
+        uint256 backingBefore = IERC20(originIn).balanceOf(wrapperIn);
+        (uint160 lpPriceBefore,,,) = manager.getSlot0(lpKey.toId());
+
+        // Model a non-standard underlying that reports a remaining allowance after wrapTo.
+        vm.mockCall(
+            originIn,
+            abi.encodeWithSelector(IERC20.allowance.selector, address(hook), wrapperIn),
+            abi.encode(uint256(1))
+        );
+        _expectLpRevertOnSwap(true, -int256(SWAP_AMOUNT / 100), LpSettlement.WrapperAllowanceNotConsumed.selector);
+        vm.clearMockedCalls();
+
+        assertEq(IERC20(originIn).allowance(address(hook), wrapperIn), 0, "approval did not roll back");
+        assertEq(IERC20(originIn).balanceOf(address(manager)), originBefore, "manager origin changed");
+        assertEq(IERC20(originIn).balanceOf(wrapperIn), backingBefore, "wrapper backing changed");
+        (uint160 lpPriceAfter,,,) = manager.getSlot0(lpKey.toId());
+        assertEq(lpPriceAfter, lpPriceBefore, "LP price changed");
+    }
+
     function test_lpDeeperButTooShallowRevertsOnPartialFill() public {
         // lp is strictly deeper than shell but still too shallow for the requested amount.
         // The lp swap cannot fill completely, so the whole transaction reverts.
@@ -799,7 +894,7 @@ contract FewV4ShellHookTest is Test {
 
         vm.prank(newOwner);
         hook.setLpPool(shellKey, lpKey);
-        (,, bool isSet) = hook.lpPools(shellKey.toId());
+        (,,,,, bool isSet,,) = hook.lpPools(shellKey.toId());
         assertTrue(isSet, "new owner registered");
     }
 
@@ -812,12 +907,24 @@ contract FewV4ShellHookTest is Test {
         emit FewV4ShellHook.LpPoolSet(shellKey.toId(), lpKey);
         hook.setLpPool(shellKey, lpKey);
 
-        (PoolKey memory rKey,, bool rSet) = hook.lpPools(shellKey.toId());
+        (
+            PoolId _lpPoolId,
+            IHooks _hooks,
+            uint24 _fee,
+            int24 _tickSpacing,
+            bool _orderAligned,
+            bool rSet,
+            address _few0,
+            address _few1
+        ) = hook.lpPools(shellKey.toId());
         assertTrue(rSet, "registered");
-        assertEq(Currency.unwrap(rKey.currency0), Currency.unwrap(lpKey.currency0), "currency0");
-        assertEq(Currency.unwrap(rKey.currency1), Currency.unwrap(lpKey.currency1), "currency1");
-        assertEq(rKey.fee, lpKey.fee, "fee");
-        assertEq(rKey.tickSpacing, lpKey.tickSpacing, "tickSpacing");
+        assertEq(_orderAligned, orderAligned, "orderAligned");
+        assertEq(_few0, Currency.unwrap(orderAligned ? lpKey.currency0 : lpKey.currency1), "few0");
+        assertEq(_few1, Currency.unwrap(orderAligned ? lpKey.currency1 : lpKey.currency0), "few1");
+        assertEq(PoolId.unwrap(_lpPoolId), PoolId.unwrap(lpKey.toId()), "lpPoolId");
+        assertEq(_fee, lpKey.fee, "fee");
+        assertEq(_tickSpacing, lpKey.tickSpacing, "tickSpacing");
+        assertEq(address(_hooks), address(lpKey.hooks), "hooks");
     }
 
     function test_setLpPool_rejectsDuplicateRouteAcrossShellPools() public {
@@ -848,8 +955,8 @@ contract FewV4ShellHookTest is Test {
         hook.setLpPool(shellKey, emptyKey);
         hook.setLpPool(anotherShell, lpKey);
 
-        (,, bool oldSet) = hook.lpPools(shellKey.toId());
-        (,, bool newSet) = hook.lpPools(anotherShell.toId());
+        (,,,,, bool oldSet,,) = hook.lpPools(shellKey.toId());
+        (,,,,, bool newSet,,) = hook.lpPools(anotherShell.toId());
         assertFalse(oldSet, "old shell still registered");
         assertTrue(newSet, "new shell not registered");
         bytes32 routeKey = keccak256(
@@ -857,6 +964,26 @@ contract FewV4ShellHookTest is Test {
         );
         assertTrue(hook.routeRegistered(routeKey), "duplicate guard missing");
         assertEq(PoolId.unwrap(hook.shellPoolForRoute(routeKey)), PoolId.unwrap(anotherShell.toId()), "reverse route");
+    }
+
+    function test_setLpPool_replacementUpdatesCachedRouteAndDuplicateGuard() public {
+        PoolKey memory replacement = lpKey;
+        replacement.fee = 3000;
+        replacement.tickSpacing = 60;
+        hook.setLpPool(shellKey, replacement);
+
+        (PoolId cachedId,, uint24 cachedFee, int24 cachedSpacing,, bool isSet,,) = hook.lpPools(shellKey.toId());
+        assertTrue(isSet, "replacement not registered");
+        assertEq(PoolId.unwrap(cachedId), PoolId.unwrap(replacement.toId()), "stale cached PoolId");
+        assertEq(cachedFee, replacement.fee, "stale cached fee");
+        assertEq(cachedSpacing, replacement.tickSpacing, "stale cached spacing");
+        bytes32 oldKey = keccak256(abi.encode(lpKey.toId(), Currency.unwrap(currency0), Currency.unwrap(currency1)));
+        bytes32 newKey =
+            keccak256(abi.encode(replacement.toId(), Currency.unwrap(currency0), Currency.unwrap(currency1)));
+        assertFalse(hook.routeRegistered(oldKey), "old duplicate guard not cleared");
+        assertEq(PoolId.unwrap(hook.shellPoolForRoute(oldKey)), bytes32(0), "old reverse route not cleared");
+        assertTrue(hook.routeRegistered(newKey), "new duplicate guard missing");
+        assertEq(PoolId.unwrap(hook.shellPoolForRoute(newKey)), PoolId.unwrap(shellKey.toId()));
     }
 
     function test_setLpPool_revertsForNonOwner() public {
@@ -883,9 +1010,9 @@ contract FewV4ShellHookTest is Test {
         assertEq(IERC20(address(tokenA)).allowance(address(hook), fakeFewA), 0, "fake wrapper allowance");
     }
 
-    function test_setLpPool_cachesUnlimitedApprovalOnlyForCanonicalWrappers() public view {
-        assertEq(IERC20(address(tokenA)).allowance(address(hook), fewA), type(uint256).max);
-        assertEq(IERC20(address(tokenB)).allowance(address(hook), fewB), type(uint256).max);
+    function test_setLpPool_doesNotGrantStandingApproval() public view {
+        assertEq(IERC20(address(tokenA)).allowance(address(hook), fewA), 0);
+        assertEq(IERC20(address(tokenB)).allowance(address(hook), fewB), 0);
     }
 
     function test_setLpPool_rejectsSwapReturnDeltaHooks() public {
@@ -905,7 +1032,7 @@ contract FewV4ShellHookTest is Test {
     function test_setLpPool_emptyKeyRemovesRegistration() public {
         // Register first.
         hook.setLpPool(shellKey, lpKey);
-        (,, bool isSet) = hook.lpPools(shellKey.toId());
+        (,,,,, bool isSet,,) = hook.lpPools(shellKey.toId());
         assertTrue(isSet, "registered");
 
         // Empty lpPoolKey (currency0 == address(0)) removes the registration.
@@ -921,7 +1048,7 @@ contract FewV4ShellHookTest is Test {
         emit FewV4ShellHook.LpPoolRemoved(shellKey.toId());
         hook.setLpPool(shellKey, emptyKey);
 
-        (,, bool rSet) = hook.lpPools(shellKey.toId());
+        (,,,,, bool rSet,,) = hook.lpPools(shellKey.toId());
         assertFalse(rSet, "removed");
     }
 
@@ -1705,6 +1832,60 @@ contract FewV4ShellHookTest is Test {
         assertTrue(amount0After != amount0Before || amount1After != amount1Before, "pseudo TVL changed after swap");
     }
 
+    function test_pseudoTvl_cappedByWrapperBacking() public {
+        manager.initialize(lpKey, _lpPriceForBetterZeroForOne());
+        _addLpLiquidity(LP_LIQUIDITY);
+
+        // Drain the few0 wrapper's underlying so its backing is below the lp pool's virtual depth.
+        // route.few0 always wraps shell currency0, so this caps amount0 in shell order.
+        address few0 = factory.getWrappedToken(Currency.unwrap(currency0));
+        address underlying0 = IFewWrappedToken(few0).token();
+        uint256 backing = IERC20(underlying0).balanceOf(few0);
+        uint256 smallBacking = 1e18;
+        vm.prank(few0);
+        IERC20(underlying0).safeTransfer(address(0xdead), backing - smallBacking);
+
+        (uint256 amount0, uint256 amount1) = hook.pseudoTotalValueLocked(shellKey.toId());
+
+        assertEq(amount0, smallBacking, "amount0 capped by wrapper backing");
+        assertGt(amount1, 0, "amount1 unaffected by few0 backing");
+    }
+
+    function test_pseudoTvl_cappedBySettlementInventory() public {
+        manager.initialize(lpKey, _lpPriceForBetterZeroForOne());
+        _addLpLiquidity(LP_LIQUIDITY);
+
+        // Drain PoolManager's currency0 balance so settlement inventory is the binding constraint.
+        address token0 = Currency.unwrap(currency0);
+        uint256 managerBal = IERC20(token0).balanceOf(address(manager));
+        uint256 smallInventory = 2e18;
+        vm.prank(address(manager));
+        IERC20(token0).safeTransfer(address(0xdead), managerBal - smallInventory);
+
+        (uint256 amount0, uint256 amount1) = hook.pseudoTotalValueLocked(shellKey.toId());
+
+        assertEq(amount0, smallInventory, "amount0 capped by settlement inventory");
+        assertGt(amount1, 0, "amount1 unaffected by currency0 settlement");
+    }
+
+    function test_pseudoTvl_returnsZeroSideWhenWrapperBackingZero() public {
+        manager.initialize(lpKey, _lpPriceForBetterZeroForOne());
+        _addLpLiquidity(LP_LIQUIDITY);
+
+        // Fully drain the few1 wrapper's underlying: the shell-side amount1 reports zero even
+        // though the lp pool has virtual depth on that side.
+        address few1 = factory.getWrappedToken(Currency.unwrap(currency1));
+        address underlying1 = IFewWrappedToken(few1).token();
+        uint256 backing = IERC20(underlying1).balanceOf(few1);
+        vm.prank(few1);
+        IERC20(underlying1).safeTransfer(address(0xdead), backing);
+
+        (uint256 amount0, uint256 amount1) = hook.pseudoTotalValueLocked(shellKey.toId());
+
+        assertGt(amount0, 0, "amount0 unaffected by few1 backing");
+        assertEq(amount1, 0, "amount1 is zero when few1 has no backing");
+    }
+
     // ---------------------------------------------------------------------
     // _beforeSwap uint128 guard
     // ---------------------------------------------------------------------
@@ -1818,6 +1999,8 @@ contract FewV4ShellHookTest is Test {
         assertEq(IERC20(fewWeth).balanceOf(address(hook)), 0, "hook fewWETH");
         assertEq(IERC20(fewA).balanceOf(address(hook)), 0, "hook fewA");
         assertEq(tokenA.balanceOf(address(hook)), 0, "hook tokenA");
+        assertEq(weth.allowance(address(hook), fewWeth), 0, "WETH wrapper allowance");
+        assertEq(tokenA.allowance(address(hook), fewA), 0, "tokenA wrapper allowance");
     }
 
     function test_nativeEthSwap_exactInput_oneForZero() public {
@@ -1859,6 +2042,8 @@ contract FewV4ShellHookTest is Test {
         assertEq(IERC20(fewWeth).balanceOf(address(hook)), 0, "hook fewWETH");
         assertEq(IERC20(fewA).balanceOf(address(hook)), 0, "hook fewA");
         assertEq(tokenA.balanceOf(address(hook)), 0, "hook tokenA");
+        assertEq(weth.allowance(address(hook), fewWeth), 0, "WETH wrapper allowance");
+        assertEq(tokenA.allowance(address(hook), fewA), 0, "tokenA wrapper allowance");
     }
 
     function test_forcedEthDust_doesNotAffectNativeSwapAccounting() public {

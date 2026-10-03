@@ -37,11 +37,15 @@ The Hook can serve many Shell Pools from one address. Each Shell Pool has its ow
 ## Pricing and discovery
 
 - `quote()` simulates the complete Shell execution through the official V4Quoter.
-- `pseudoTotalValueLocked()` reports the FewToken LP's active-liquidity depth in origin-token order. It is a routing proxy, not withdrawable TVL.
+- `pseudoTotalValueLocked()` reports the FewToken LP's active-liquidity depth in origin-token order, capped by wrapper backing and PoolManager origin-token inventory. PoolManager balances are shared across pools; the proxy does not reserve that inventory or report withdrawable TVL.
 - `AggregatorPoolRegistered` records Shell Pool initialization.
 - `LpSwap` records the Shell PoolId, actual FewToken LP PoolId, direction and amounts.
 
 The standard quote models swap before payment. A router that prepays PoolManager may execute with lower starting inventory than the quote requires, so production integration must also simulate the complete router calldata.
+
+`setLpPool()` caches the validated LP PoolId, wrapper order, fee, tick spacing and Hook. Its public `lpPools()` getter returns those fields rather than a nested PoolKey. Indexers can use `LpPoolSet` for the original complete key. `LpSwap` contains the Shell PoolId, LP PoolId, sender, direction and actual input/output amounts; it omits the redundant `usedLp` and `amountSpecified` fields from the deployed event.
+
+Approvals are exact per swap, not cached. The wrapper must consume its input allowance completely; a remaining allowance reverts the entire transaction.
 
 ## Administration
 

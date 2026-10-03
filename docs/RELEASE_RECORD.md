@@ -11,9 +11,9 @@ Complete this file from the exact clean commit selected for deployment. Do not r
 | Solidity | `0.8.26` |
 | Foundry | `<FOUNDRY_VERSION>` |
 | Optimizer | `enabled, 200 runs, via IR` |
-| Runtime size | `15,643 bytes` for the current local candidate; remeasure after the final commit |
+| Runtime size | `16,385 bytes` for the main-integrated local candidate; remeasure after the final commit |
 | Runtime codehash | `<RUNTIME_CODEHASH>` |
-| Test result | `97 passed, 0 failed, 0 skipped` reproduced on October 3, 2026; fixed blocks `25,833,244` and `26,069,215`; three Universal Router tests also passed with `--isolate`; historical latest-state fork pass at block `26,087,184` on September 30, 2026 |
+| Test result | `107 passed, 0 failed, 0 skipped` across four suites after main integration on October 3, 2026; fixed blocks `25,833,244` and `26,069,215`; three Universal Router tests also passed with `--isolate`; historical latest-state evidence at block `26,087,184` is not a validation of this updated candidate |
 | Final diff approved by | `<APPROVER>` |
 
 ## 2. Immutable configuration

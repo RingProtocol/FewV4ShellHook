@@ -11,6 +11,7 @@ The release candidate is suitable for public source review and a capped canary a
 | Risk | Control |
 |---|---|
 | Fake wrapper receives an allowance | Both LP currencies must equal the FewFactory canonical wrappers for their reported underlyings |
+| Wrapper retains a usable allowance after conversion | Registration grants no approval; each swap approves its exact input and reverts unless the allowance is fully consumed |
 | Third party front-runs Shell initialization with a misleading permanent price | `_beforeInitialize` accepts only the current owner, expected to be a Safe |
 | Wrong constructor dependency | Every dependency must contain code; V4Quoter must point to the configured PoolManager |
 | Same LP is advertised by duplicate Shell metadata | Duplicate routes for the same raw origin-token pair and FewToken LP are rejected within the Hook |
@@ -24,7 +25,7 @@ The release candidate is suitable for public source review and a capped canary a
 | Admin typo transfers control | Two-step ownership transfer; production owner should be a Safe |
 | Admin needs to stop one pair | Removing that Shell Pool's LP mapping disables the route |
 
-Cached unlimited approvals are granted only to canonical FewToken wrappers. This is acceptable only while the configured FewFactory and wrapper bytecode remain the reviewed, non-upgradeable implementation. The Hook itself cannot revoke an allowance without changing bytecode, so deployment review must verify those dependencies.
+The main integration removes cached unlimited approvals. The Hook grants only the exact input amount during conversion and checks that the canonical wrapper consumed it completely. The dependency still needs review, but it has no standing allowance after a successful swap. A non-standard token that reports a remaining allowance causes the full transaction to revert.
 
 ## Tests completed
 
@@ -47,10 +48,15 @@ Cached unlimited approvals are granted only to canonical FewToken wrappers. This
 - Two-step ownership, unauthorized initialization and unauthorized admin calls.
 - Residual origin/FewToken/WETH/ETH balances.
 - Fuzzed quote/settlement consistency.
+- Zero remaining allowance in both directions and exact input/output, including native WETH conversion.
+- Unexpected origin-token dust cannot be pulled through a residual wrapper allowance.
+- Unconsumed allowance rolls back approval, balances, backing and LP price.
+- Cached route replacement clears the old duplicate guard and updates its PoolId, fee and tick spacing.
+- Discovery depth is capped by wrapper backing and shared PoolManager inventory.
 
-October 3, 2026 recheck: 87 local integration/deployment tests plus 10 fixed-block fork tests passed; no tests were skipped. The three Universal Router fork tests also passed with `--isolate`, including the 24-case matrix and slippage rollback. The fuzz target ran 10,000 cases. Format, build and high-severity lint checks passed; runtime is 15,643 bytes.
+October 3, 2026 post-integration recheck: `forge test --force --json` executed all four suites, with 97 local integration/deployment tests and 10 fixed-block fork tests passing; none failed or skipped. The three Universal Router tests also passed with `--isolate`, including the 24-case matrix and slippage rollback. The fuzz target ran 10,000 cases. Format, build and high-severity lint checks passed; runtime is 16,385 bytes. Incremental runs omitted a fork suite during concurrent validation, so those partial totals are not the acceptance record. Validation must be serial and must reconcile all expected suites.
 
-The earlier latest-state fork run used block `26,087,184` on September 30, 2026. The prior review recorded Slither analyzing 50 contracts with 99 detectors and zero results after intentional suppressions for ignored V4Quoter gas estimates, unused slot fields, the required DeltaResolver override and bounded route registration. Slither was not available for the October 3 push check and was not rerun; this is not a new static-analysis or audit result.
+The earlier latest-state fork run used block `26,087,184` on September 30, 2026; it does not certify this updated candidate. The prior review recorded Slither analyzing 50 contracts with 99 detectors and zero results after intentional suppressions for ignored V4Quoter gas estimates, unused slot fields, the required DeltaResolver override and bounded route registration. Slither was not available locally for the October 3 integration check and was not rerun; this is not a new static-analysis or audit result. CI must be inspected separately, and an RPC-unavailable fork job is not evidence that fork tests ran.
 
 ## Remaining risks
 
@@ -74,4 +80,4 @@ The earlier latest-state fork run used block `26,087,184` on September 30, 2026.
 
 The review approach follows Uniswap's [v4 Security Framework](https://developers.uniswap.org/docs/protocols/v4/security), OpenZeppelin's [v4 Core audit](https://blog.openzeppelin.com/uniswap-v4-core-audit) and its [Hooks Library audit](https://blog.openzeppelin.com/uniswap-hooks-library-milestone-1-audit).
 
-The cached wrapper allowance is not a new approval model. Uniswap's audited `WstETHHook` also grants its immutable canonical wrapper a maximum underlying-token allowance once. Here, `setLpPool()` first requires the exact FewFactory wrapper, the factory mapping is write-once, and deployed `FewWrappedToken` contracts are non-upgradeable. The Hook still checks the exact wrapper-backing and recipient-balance change on every conversion and normally retains no token balance. A defect in the canonical wrapper remains a dependency risk, so this design is limited to the reviewed FewFactory and remains in the audit scope.
+The earlier maximum-approval candidate is superseded by exact per-swap approval after integrating main's zero-residual-allowance tests. Canonical-wrapper identity and exact backing/settlement checks remain mandatory. A wrapper defect or malicious origin token remains a dependency risk; removing standing approval is not a general safety guarantee.

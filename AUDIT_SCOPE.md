@@ -8,8 +8,8 @@
 | Commit | To be fixed after internal review |
 | Compiler | Solidity `0.8.26`, optimizer 200 runs, `via_ir = true`, Cancun |
 | Framework | Foundry |
-| Test snapshot | `97 passed, 0 failed, 0 skipped` on October 3, 2026; 10,000 fuzz cases; fixed Ethereum blocks `25,833,244` and `26,069,215`; the three Universal Router fork tests also passed with `--isolate` |
-| Runtime size | `15,643 bytes`, 8,933 bytes below the EIP-170 limit |
+| Test snapshot | `107 passed, 0 failed, 0 skipped` across all four suites after main integration on October 3, 2026; 10,000 fuzz cases; fixed Ethereum blocks `25,833,244` and `26,069,215`; the three Universal Router fork tests also passed with `--isolate` |
+| Runtime size | `16,385 bytes`, 8,191 bytes below the EIP-170 limit |
 
 The current deployment at `0xadef...2088` is prior art and live-integration evidence. It is not the bytecode in this review target.
 
@@ -30,8 +30,8 @@ Pinned dependencies, scripts and tests are not production code, but their assump
 
 1. An origin-token v4 Shell Pool is the public Uniswap entry; its curve and fee are not the execution venue.
 2. Only the owner may initialize a Shell Pool; the owner then binds that PoolId to one explicit canonical FewToken v4 LP.
-3. The Hook takes the full swap delta, wraps origin input, executes a nested v4 swap, unwraps output and settles atomically.
-4. `quote()` simulates the complete path through V4Quoter. `pseudoTotalValueLocked()` reports active FewToken LP depth in origin-token order.
+3. The Hook executes a nested v4 swap, then wraps origin input and unwraps output to settle the full swap delta atomically through PoolManager.
+4. `quote()` simulates the complete path through V4Quoter. `pseudoTotalValueLocked()` reports active FewToken LP depth in origin-token order, capped by wrapper backing and shared PoolManager inventory.
 5. The Hook is immutable and non-upgradeable. The owner can register/remove routes and transfer ownership, but cannot sweep assets, withdraw LP or charge a Hook fee.
 6. Duplicate Shell metadata cannot advertise the same FewToken LP for the same raw origin pair within one deployment. Native ETH and WETH routes are distinct.
 
@@ -42,7 +42,7 @@ Pinned dependencies, scripts and tests are not production code, but their assump
 3. Can shared PoolManager physical balances create loss rather than a clean quote/execution failure?
 4. Do return-value, temporary-balance and exact wrapper-backing checks close lying wrapper and fee-on-transfer paths?
 5. Can an underlying, canonical wrapper or permitted inner LP Hook reenter any value-moving path?
-6. Is cached unlimited approval acceptable given immutable canonical FewFactory wrappers, or should a deployment-specific revocation mechanism be added?
+6. Are exact input approvals fully consumed in every native/ERC20 path, and does a nonzero remaining allowance reliably revert conversion and the nested swap?
 7. Can initialization, route registration/removal, ownership transfer or cross-deployment duplicates create stale prices or misleading routing depth?
 8. Does `pseudoTotalValueLocked()` remain a safe discovery signal when settlement inventory is smaller than LP depth?
 9. Does the v4 Shell fee bypass plus the nested FewToken LP fee satisfy Uniswap's current routing criteria?

@@ -9,18 +9,23 @@ on:
 env:
   FOUNDRY_PROFILE: default
 
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
     name: Build and hermetic tests
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout with submodules
-        uses: actions/checkout@v4
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
         with:
           submodules: recursive
+          persist-credentials: false
 
       - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
+        uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
         with:
           version: v1.5.1
 
@@ -39,33 +44,53 @@ jobs:
   fork-tests:
     name: Fixed-block mainnet fork tests
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout with submodules
-        uses: actions/checkout@v4
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
         with:
           submodules: recursive
+          persist-credentials: false
 
       - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
+        uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
         with:
           version: v1.5.1
 
-      - name: Run fork tests
+      - name: Check fork RPC availability
+        id: rpc
+        shell: bash
         env:
           ETH_RPC_URL: ${{ secrets.ETH_RPC_URL }}
-        run: forge test --match-path "test/fork/*" -vvv
+        run: |
+          if [ -n "$ETH_RPC_URL" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Fork validation was not run because ETH_RPC_URL is unavailable."
+          fi
+
+      - name: Run fork tests
+        if: steps.rpc.outputs.available == 'true'
+        env:
+          ETH_RPC_URL: ${{ secrets.ETH_RPC_URL }}
+        run: |
+          forge test --match-path "test/fork/*" -vvv
+          forge test --isolate --match-contract FewV4ShellHookMainnetTest -vv
 
   slither:
     name: Slither static analysis
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout with submodules
-        uses: actions/checkout@v4
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
         with:
           submodules: recursive
+          persist-credentials: false
 
       - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
+        uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
         with:
           version: v1.5.1
 

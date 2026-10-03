@@ -1,6 +1,6 @@
 # Deployment runbook
 
-Updated: 2026-09-30
+Updated: 2026-10-03
 
 This runbook deploys a new Hook address. It does not modify the current `0xadef...2088` deployment.
 
@@ -27,6 +27,7 @@ forge build --sizes
 forge test --offline
 forge test --match-path 'test/fork/FewV4ShellHookFork.t.sol' -vv
 forge test --match-path 'test/fork/FewV4ShellHookMainnet.t.sol' -vv
+forge test --isolate --match-contract FewV4ShellHookMainnetTest -vv
 ```
 
 Stop if any test fails or if the contract exceeds the EIP-170 runtime-size limit.
@@ -114,7 +115,7 @@ Before increasing capital:
 
 1. `owner()` equals the intended Safe and `pendingOwner()` is zero.
 2. Only the owner Safe can initialize a Shell Pool; an unrelated address fails.
-3. `lpPools(shellPoolId)` matches the reviewed FewToken PoolKey.
+3. `lpPools(shellPoolId)` returns the reviewed LP PoolId, Hook, fee, tick spacing, ordering and wrappers. This release keeps main's cached-field getter ABI; use `LpPoolSet` to recover the original complete PoolKey.
 4. The route-registration key points to that Shell Pool and no duplicate Shell advertises the same LP for the same origin pair.
 5. `pseudoTotalValueLocked(shellPoolId)` is nonzero and tracks the FewToken LP's active liquidity.
 6. `quote()` works in both directions for exact input and exact output.
@@ -122,6 +123,9 @@ Before increasing capital:
 8. One small signed canary trade emits `LpSwap` with the expected Shell and FewToken PoolIds.
 9. Hook balances return to their starting values.
 10. Removing the LP mapping makes quote and swap fail; restoring it resumes trading.
+11. Both origin-token allowances from Hook to wrappers are zero after each swap, including WETH for a native input.
+
+Update event consumers for the shorter `LpSwap` ABI: Shell PoolId, LP PoolId, sender, direction, amountIn and amountOut. It no longer includes `usedLp` or `amountSpecified`. The new deployment does not change the old address or its ABI.
 
 ## 8. Stop conditions
 

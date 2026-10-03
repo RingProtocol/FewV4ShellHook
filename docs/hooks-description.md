@@ -26,7 +26,7 @@ function quote(bool zeroToOne, int256 amountSpecified, bytes32 poolId)
     returns (uint256 amountUnspecified);
 ```
 
-`pseudoTotalValueLocked` reports a routing-depth proxy from the registered FewToken LP in origin-token order. `quote` simulates the complete Shell swap through V4Quoter, including the FewToken swap, wrap/unwrap, inventory, backing and full-fill checks. Negative `amountSpecified` is exact input; positive is exact output.
+`pseudoTotalValueLocked` reports a routing-depth proxy from the registered FewToken LP in origin-token order, capped by wrapper backing and PoolManager origin-token inventory. The inventory is shared across pools, not reserved for this route. `quote` simulates the complete Shell swap through V4Quoter, including the FewToken swap, wrap/unwrap, inventory, backing and full-fill checks. Negative `amountSpecified` is exact input; positive is exact output. It is intended for `eth_call`: the simulation rolls back all changes and is deliberately not declared `view`. It models swap-before-payment; prepaid router execution also needs full-calldata simulation.
 
 ## Permissions and administration
 
@@ -36,8 +36,10 @@ The contract is non-upgradeable. It has no fee, sweep or LP-withdrawal function.
 
 PoolManager, FewFactory, WETH9 and V4Quoter are immutable constructor dependencies. Each must contain code, and V4Quoter must point to the configured PoolManager. Wrap/unwrap enforce exact wrapper-backing changes; unexpected ETH senders are rejected.
 
+The Hook grants only the current input amount to its canonical wrapper. The wrapper must consume the allowance completely, or the entire swap reverts. Registration grants no standing allowance.
+
 ## Validation status
 
-All 97 local and fixed-block tests passed again on October 3, 2026. They cover both directions, exact input/output, native ETH/WETH, quote parity, inventory/backing failures, under-transfer rollback, forced ETH dust, fake wrappers, dependency mismatch, unauthorized initialization, duplicate routes, nested-Hook reentrancy, route removal and residual balances. A fixed-block Ethereum fork executes 24 Universal Router combinations across ETH/WBTC and WETH/WBTC and verifies slippage rollback; the three Router tests also passed with `--isolate`. The historical latest-state fork run used block `26,087,184` on September 30, 2026.
+After main integration, all 107 tests across the four local and fixed-block suites passed on October 3, 2026, with no skips. They cover both directions, exact input/output, native ETH/WETH, quote parity, inventory/backing failures, under-transfer rollback, forced ETH dust, fake wrappers, dependency mismatch, unauthorized initialization, duplicate routes, nested-Hook reentrancy, route replacement/removal, zero remaining allowance and residual balances. A fixed-block Ethereum fork executes 24 Universal Router combinations across ETH/WBTC and WETH/WBTC and verifies slippage rollback; the three Router tests also passed with `--isolate`. The historical latest-state run at block `26,087,184` on September 30, 2026 does not certify the updated candidate.
 
 The code is unaudited. Source review, deployment approval, route discovery and default frontend selection remain separate review steps.

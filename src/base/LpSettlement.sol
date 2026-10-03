@@ -23,9 +23,9 @@ abstract contract LpSettlement is DeltaResolver {
     error TokenBalanceMismatch(address token, uint256 expectedBalance, uint256 actualBalance);
     error WrapperBackingDeltaMismatch(address wrapper, uint256 expectedBalance, uint256 actualBalance);
     error SettlementAmountMismatch(address token, uint256 paid, uint256 expected);
+    error WrapperAllowanceNotConsumed(address underlying, address wrapper, uint256 remaining);
 
     IWETH9 internal immutable _weth;
-    mapping(address wrapper => bool approved) internal _wrapperApproved;
 
     constructor(IWETH9 weth) {
         _weth = weth;
@@ -58,15 +58,8 @@ abstract contract LpSettlement is DeltaResolver {
         _requireBalance(output, outputBaseline);
     }
 
-    /// @dev Call only with a wrapper explicitly validated against FewFactory or resolved from it.
-    function _authorizeWrapper(address underlying, address fewToken) internal {
-        if (_wrapperApproved[fewToken]) return;
-        // Effects before interaction: any reentrant attempt observes the wrapper as already handled.
-        // A failed approval reverts this flag with the rest of the transaction.
-        _wrapperApproved[fewToken] = true;
-        IERC20(underlying).forceApprove(fewToken, type(uint256).max);
-    }
-
+    /// @dev Reuse the caller-measured input baseline. Approve only this conversion's amount;
+    ///      the canonical wrapper must consume the allowance completely or the swap reverts.
     function _wrapAndSettle(Currency input, address fewToken, uint256 amount, uint256 inputBefore) internal {
         address underlying;
         uint256 wethBefore = 0;
@@ -82,11 +75,13 @@ abstract contract LpSettlement is DeltaResolver {
         if (inputBefore < amount) revert InsufficientConversionBalance(Currency.unwrap(input), inputBefore, amount);
 
         uint256 backingBefore = IERC20(underlying).balanceOf(fewToken);
-        _authorizeWrapper(underlying, fewToken);
+        IERC20(underlying).forceApprove(fewToken, amount);
         poolManager.sync(Currency.wrap(fewToken));
         uint256 returnedAmount = IFewWrappedToken(fewToken).wrapTo(amount, address(poolManager));
         if (returnedAmount != amount) revert WrapReturnMismatch(returnedAmount, amount);
         _requireWrapperBacking(fewToken, underlying, backingBefore + amount);
+        uint256 remaining = IERC20(underlying).allowance(address(this), fewToken);
+        if (remaining != 0) revert WrapperAllowanceNotConsumed(underlying, fewToken, remaining);
         uint256 paid = poolManager.settle();
         if (paid != amount) revert SettlementAmountMismatch(fewToken, paid, amount);
 
@@ -96,7 +91,8 @@ abstract contract LpSettlement is DeltaResolver {
 
     function _unwrapAndSettle(address fewToken, Currency output, uint256 amount, uint256 fewBefore) internal {
         if (fewBefore < amount) revert InsufficientConversionBalance(fewToken, fewBefore, amount);
-        address underlying = IFewWrappedToken(fewToken).token();
+        // Registration already verified this underlying; avoid another wrapper.token() call.
+        address underlying = output.isAddressZero() ? address(_weth) : Currency.unwrap(output);
         uint256 backingBefore = IERC20(underlying).balanceOf(fewToken);
         if (backingBefore < amount) revert InsufficientConversionBalance(underlying, backingBefore, amount);
 
