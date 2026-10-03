@@ -1,10 +1,41 @@
-/broadcast/
-/cache/
-/out/
-/.env
-/.env.*
-out_soldb
-.vscode
-testresult
+# Foundry build artifacts
+broadcast/
+cache/
+out/
+out_soldb/
+testresult/
 
+# Dependency directories
+node_modules/
 
+# Environment secrets
+.env
+.env.*
+!.env.example
+
+# Coverage reports
+lcov.info
+coverage/
+*.lcov
+
+# Local AI, editor and session state
+.omc/
+.claude/
+.cursor/
+.windsurf/
+.aider*
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS and logs
+.DS_Store
+Thumbs.db
+*.log
+
+# Local review working files
+docs/*draft*.pdf
+docs/.gen_*
+docs/*.tsv
+docs/internal/

@@ -1,5 +1,7 @@
 # FewV4NettingShellHook 库存估算说明
 
+> 本文描述单独的净额结算实验，不适用于这个直接结算版本。当前 `FewV4ShellHook` 不维护 claim 库存，也没有 `rebalancePair()`；本文的成本和阈值不能直接用作部署参数。
+
 ## 1. 需要存哪些库存？
 
 Netting 版本不是只存 `fewToken`，而是要在 PoolManager 中维护 **4 个 ERC-6909 claim 库存**（以 ETH/WBTC 壳池为例）：
@@ -47,13 +49,13 @@ WBTC -> ETH 消耗：fewWBTC + originETH
 
 不能一概而论，取决于三个因素：
 
-1. **单笔最大 swap 量**  
+1. **单笔最大 swap 量**
    库存必须至少 >= 单笔最大输入，否则单笔就会失败。
 
-2. **连续同方向笔数 / rebalance 频率**  
+2. **连续同方向笔数 / rebalance 频率**
    例如平均单笔消耗 0.01 ETH 等值的 fewWETH，连续 1000 笔同向就需要 10 ETH。如果不希望频繁 rebalance，就要多存。
 
-3. **再平衡成本**  
+3. **再平衡成本**
    Fork 测试里，冷状态 `rebalancePair()` 大约 **33 万 gas**（WETH/WBTC）。如果链上 gas 贵，可以适当提高库存阈值、降低 rebalance 频率。
 
 以当前真实成交数据（单笔多在 0.003 ~ 0.08 ETH / 0.00008 ~ 0.001 WBTC 量级）粗略估算：
