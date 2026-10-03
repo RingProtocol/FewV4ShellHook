@@ -162,24 +162,56 @@ contract FewV4NettingShellHookForkTest is Test {
         assertEq(nettingHook.claimBalance(Currency.wrap(fewWbtc)), fewWbtcBefore);
     }
 
-    function test_claimShortfall_revertsWithoutChangingUserOrPool() public requireFork {
+    function test_claimShortfall_fallsBackToImmediateSettlement() public requireFork {
         uint256 available = nettingHook.claimBalance(Currency.wrap(fewWeth));
         nettingHook.withdrawClaim(Currency.wrap(fewWeth), address(this), available);
 
         uint256 userWbtcBefore = IERC20(WBTC).balanceOf(USER);
         uint256 userWethBefore = IERC20(WETH).balanceOf(USER);
-        (uint160 priceBefore,,,) = manager.getSlot0(fewKey.toId());
         uint128 amount = uint128(0.001 ether);
         uint256 quote = immediateHook.quote(false, -int256(uint256(amount)), immediateShellKey.toId());
         bytes[] memory inputs = _routerInputs(nettingShellKey, false, true, amount, quote);
+
         vm.prank(USER);
-        vm.expectRevert();
         INettingUniversalRouter(UNIVERSAL_ROUTER).execute(hex"10", inputs, block.timestamp + 1);
 
-        assertEq(IERC20(WBTC).balanceOf(USER), userWbtcBefore);
-        assertEq(IERC20(WETH).balanceOf(USER), userWethBefore);
-        (uint160 priceAfter,,,) = manager.getSlot0(fewKey.toId());
-        assertEq(priceAfter, priceBefore);
+        assertEq(IERC20(WETH).balanceOf(USER), userWethBefore - amount);
+        assertEq(IERC20(WBTC).balanceOf(USER), userWbtcBefore + quote);
+    }
+
+    function test_fullyUnfundedHook_fallsBackToImmediateSettlement() public requireFork {
+        _withdrawAllClaims();
+
+        uint128 amount = uint128(0.001 ether);
+        uint256 quote = immediateHook.quote(false, -int256(uint256(amount)), immediateShellKey.toId());
+        bytes[] memory inputs = _routerInputs(nettingShellKey, false, true, amount, quote);
+
+        uint256 userWbtcBefore = IERC20(WBTC).balanceOf(USER);
+        uint256 userWethBefore = IERC20(WETH).balanceOf(USER);
+
+        vm.prank(USER);
+        INettingUniversalRouter(UNIVERSAL_ROUTER).execute(hex"10", inputs, block.timestamp + 1);
+
+        assertEq(IERC20(WETH).balanceOf(USER), userWethBefore - amount);
+        assertEq(IERC20(WBTC).balanceOf(USER), userWbtcBefore + quote);
+    }
+
+    function test_originOutputClaimShortfall_fallsBackToImmediateSettlement() public requireFork {
+        uint256 available = nettingHook.claimBalance(Currency.wrap(WBTC));
+        nettingHook.withdrawClaim(Currency.wrap(WBTC), address(this), available);
+
+        uint128 amount = uint128(0.001 ether);
+        uint256 quote = immediateHook.quote(false, -int256(uint256(amount)), immediateShellKey.toId());
+        bytes[] memory inputs = _routerInputs(nettingShellKey, false, true, amount, quote);
+
+        uint256 userWbtcBefore = IERC20(WBTC).balanceOf(USER);
+        uint256 userWethBefore = IERC20(WETH).balanceOf(USER);
+
+        vm.prank(USER);
+        INettingUniversalRouter(UNIVERSAL_ROUTER).execute(hex"10", inputs, block.timestamp + 1);
+
+        assertEq(IERC20(WETH).balanceOf(USER), userWethBefore - amount);
+        assertEq(IERC20(WBTC).balanceOf(USER), userWbtcBefore + quote);
     }
 
     function test_ownerCanWithdrawErc20AndNativeClaims() public requireFork {
@@ -301,6 +333,20 @@ contract FewV4NettingShellHookForkTest is Test {
     function _depositClaim(Currency currency, uint256 amount) private {
         IERC20(Currency.unwrap(currency)).forceApprove(address(nettingHook), amount);
         nettingHook.depositClaim(currency, amount);
+    }
+
+    function _withdrawAllClaims() private {
+        nettingHook.withdrawClaim(Currency.wrap(WETH), address(this), nettingHook.claimBalance(Currency.wrap(WETH)));
+        nettingHook.withdrawClaim(Currency.wrap(WBTC), address(this), nettingHook.claimBalance(Currency.wrap(WBTC)));
+        nettingHook.withdrawClaim(
+            Currency.wrap(fewWeth), address(this), nettingHook.claimBalance(Currency.wrap(fewWeth))
+        );
+        nettingHook.withdrawClaim(
+            Currency.wrap(fewWbtc), address(this), nettingHook.claimBalance(Currency.wrap(fewWbtc))
+        );
+        nettingHook.withdrawClaim(
+            Currency.wrap(address(0)), RECIPIENT, nettingHook.claimBalance(Currency.wrap(address(0)))
+        );
     }
 
     function _prepareUser() private {
