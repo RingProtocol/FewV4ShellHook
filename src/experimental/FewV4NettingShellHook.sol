@@ -156,12 +156,14 @@ contract FewV4NettingShellHook is FewV4ShellHook, IUnlockCallback {
         return bytes("");
     }
 
-    /// @dev The base hook checks PoolManager cash because it takes physical origin tokens before router
-    ///      settlement. This implementation pays the inner pool by burning prefunded FewToken claims.
+    /// @dev If the hook holds enough FewToken claims to cover the inner-pool input, use netting.
+    ///      Otherwise fall back to the base hook's flash conversion, which requires PoolManager
+    ///      to hold enough physical origin token. Revert only when neither source is available.
     function _requireSettlementInventory(address origin, uint256 amount) internal view override {
         address underlying = origin == address(0) ? address(weth) : origin;
         address fewToken = fewFactory.getWrappedToken(underlying);
-        _requireClaim(Currency.wrap(fewToken), amount);
+        if (claimBalance(Currency.wrap(fewToken)) >= amount) return;
+        super._requireSettlementInventory(origin, amount);
     }
 
     function convertAndSettle(
@@ -175,16 +177,19 @@ contract FewV4NettingShellHook is FewV4ShellHook, IUnlockCallback {
         Currency fewIn = Currency.wrap(shellZeroForOne ? route.few0 : route.few1);
         Currency fewOut = Currency.wrap(shellZeroForOne ? route.few1 : route.few0);
 
-        _requireClaim(fewIn, amountIn);
-        _requireClaim(originOut, amountOut);
+        if (claimBalance(fewIn) >= amountIn && claimBalance(originOut) >= amountOut) {
+            // Netting path: pay and receive the real FewToken LP swap with prefunded claims.
+            poolManager.burn(address(this), fewIn.toId(), amountIn);
+            poolManager.mint(address(this), fewOut.toId(), amountOut);
 
-        // Pay and receive the real FewToken LP swap with claims already held by this hook.
-        poolManager.burn(address(this), fewIn.toId(), amountIn);
-        poolManager.mint(address(this), fewOut.toId(), amountOut);
-
-        // Keep the trader's origin input as a claim and release prefunded origin output inventory.
-        poolManager.mint(address(this), originIn.toId(), amountIn);
-        poolManager.burn(address(this), originOut.toId(), amountOut);
+            // Keep the trader's origin input as a claim and release prefunded origin output inventory.
+            poolManager.mint(address(this), originIn.toId(), amountIn);
+            poolManager.burn(address(this), originOut.toId(), amountOut);
+        } else {
+            // Fallback path: run the base hook's immediate wrap/unwrap settlement.
+            // _requireSettlementInventory already verified that PoolManager has enough origin token.
+            super.convertAndSettle(route, shellZeroForOne, amountIn, amountOut);
+        }
     }
 
     function _runClaimRequest(RequestKind kind, Currency currency, address target, uint256 amount) private {
@@ -195,7 +200,9 @@ contract FewV4NettingShellHook is FewV4ShellHook, IUnlockCallback {
     }
 
     function _depositClaim(Currency currency, uint256 amount) private {
+        // 通过 unlock/lock 回调将资产实际结算到 PoolManager 的 cash 账户
         _settleExact(currency, amount);
+        // 在本合约 Shell 内部铸造等额 claim 并校验余额增量正确
         _mintClaim(currency, amount);
     }
 

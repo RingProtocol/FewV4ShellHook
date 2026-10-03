@@ -28,7 +28,7 @@ No wrap or unwrap runs on the user's swap path. Opposite-direction flow offsets 
 - `rebalancePair()` repairs both sides of a one-way flow in one transaction.
 - `claimBalance()` exposes the exact PoolManager claim balance.
 
-Only the owner can move inventory. Registered FewToken pools must use canonical wrappers returned by FewFactory. Callback data is bound to an active request hash, and claim shortfalls revert the complete swap.
+Only the owner can move inventory. Registered FewToken pools must use canonical wrappers returned by FewFactory. Callback data is bound to an active request hash. A single claim shortfall falls back to the base hook's immediate wrap/unwrap settlement (no user-visible revert, no gas saving); the swap only reverts when both the claim inventory and the PoolManager cash are insufficient for the required leg. This fallback behaviour was introduced in `ac4c1f4`.
 
 ## Fork evidence
 
@@ -38,7 +38,7 @@ The fixed-block fork uses Ethereum block `26,069,215` and the fwWBTC/fwWETH pool
 - Netting and immediate settlement return identical quotes and user balances.
 - Against current `main`, netting reduces the user transaction by `169,185-181,803 gas` in the tested matrix.
 - A cold combined rebalance costs `331,241 gas` for WETH/WBTC and `339,226 gas` for ETH/WBTC, excluding transaction intrinsic gas.
-- Claim shortage, unauthorized inventory management, forged callback data, and non-canonical wrappers revert.
+- Unauthorized inventory management, forged callback data, and non-canonical wrappers revert. Claim shortage now triggers fallback settlement; the hard revert only applies when neither claim inventory nor PoolManager cash can cover the swap.
 - The new fork suite passes `9/9`; the existing fork suite passes `7/7`; local integration/deployment tests pass `73/73`, including 10,000 fuzz runs.
 
 The product comparison against the separately optimized Shell vNext remains the conservative decision baseline: each user swap saves `98,303-137,145 gas`, and four same-direction trades are the minimum practical batch before settlement. Three trades are too close to break-even after keeper calldata and cold-state variation.
