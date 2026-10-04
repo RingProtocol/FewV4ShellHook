@@ -6,7 +6,6 @@ import {Script, console2} from "forge-std/Script.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 
-import {HookMiner} from "v4-periphery/src/utils/HookMiner.sol";
 import {IV4Quoter} from "v4-periphery/src/interfaces/IV4Quoter.sol";
 
 import {FewV4ShellHook} from "../src/FewV4ShellHook.sol";
@@ -41,7 +40,9 @@ contract HookDeployer {
 ///         in the hook constructor arguments.
 ///
 /// Required env:
-///   HOOK_OWNER  - the hook owner set during construction
+///   HOOK_OWNER              - the hook owner set during construction
+///   HOOK_SALT               - the reviewed CREATE2 salt printed by the mining script
+///   EXPECTED_HOOK_ADDRESS   - the reviewed Hook address printed by the mining script
 ///
 /// Optional env (defaults are Ethereum mainnet):
 ///   V4_POOL_MANAGER, FEW_FACTORY, WETH9, V4_QUOTER
@@ -57,8 +58,10 @@ contract DeployFewV4ShellHookWithOwner is Script {
         address wethAddress = vm.envOr("WETH9", WETH9_DEFAULT);
         address v4QuoterAddress = vm.envOr("V4_QUOTER", V4_QUOTER_DEFAULT);
         address newOwner = vm.envAddress("HOOK_OWNER");
+        bytes32 salt = vm.envBytes32("HOOK_SALT");
+        address reviewedHook = vm.envAddress("EXPECTED_HOOK_ADDRESS");
 
-        uint256 deployerPrivateKey = vm.envUint("ETH_PRIVATE_KEY");
+        uint256 deployerPrivateKey = _privateKey();
         address deployer = vm.addr(deployerPrivateKey);
 
         bytes memory constructorArgs = abi.encode(
@@ -76,9 +79,13 @@ contract DeployFewV4ShellHookWithOwner is Script {
         uint256 deployerNonce = vm.getNonce(deployer);
         address deployerAddr = vm.computeCreateAddress(deployer, deployerNonce);
 
-        // Mine the hook CREATE2 address from the HookDeployer's address.
-        (address expectedHook, bytes32 salt) =
-            HookMiner.find(deployerAddr, flags, type(FewV4ShellHook).creationCode, constructorArgs);
+        address expectedHook = address(
+            uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), deployerAddr, salt, keccak256(initCode)))))
+        );
+        require(expectedHook == reviewedHook, "salt/nonce/constructor drift from reviewed Hook");
+        require(
+            (uint160(reviewedHook) & uint160(Hooks.ALL_HOOK_MASK)) == flags, "reviewed Hook has wrong permission bits"
+        );
 
         console2.log("=== FewV4ShellHook deployment (owner in constructor) ===");
         console2.log("Deployer:      ", deployer);
@@ -120,5 +127,13 @@ contract DeployFewV4ShellHookWithOwner is Script {
 
     function _flags() internal pure returns (uint160) {
         return uint160(Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.BEFORE_INITIALIZE_FLAG);
+    }
+
+    function _privateKey() internal view returns (uint256) {
+        string memory raw = vm.envString("ETH_PRIVATE_KEY");
+        bytes memory value = bytes(raw);
+        if (value.length == 64) return vm.parseUint(string.concat("0x", raw));
+        require(value.length == 66 && value[0] == "0" && value[1] == "x", "invalid ETH_PRIVATE_KEY");
+        return vm.parseUint(raw);
     }
 }
