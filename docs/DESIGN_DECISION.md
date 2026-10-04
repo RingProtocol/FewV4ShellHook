@@ -16,7 +16,7 @@ Ship the direct-settlement release candidate. Keep batched netting in a separate
 
 ### October 3 integration decision
 
-The PR now incorporates `main@7d760a9`: cached route fields, physical-balance caps for the discovery depth proxy and the smaller `LpSwap` event are retained. Canonical-wrapper validation, explicit routes, owner-only initialization, duplicate-route rejection and two-step ownership are retained from the release candidate.
+The PR now incorporates `main@7d760a9`: cached route fields, physical-balance caps for the discovery depth proxy and the smaller `LpSwap` event are retained. Canonical-wrapper validation, explicit routes, owner-only initialization and two-step ownership are retained from the release candidate. The duplicate-route rejection is removed so fee/tick variants may share one LP.
 
 The earlier candidate cached maximum wrapper approvals. That option is withdrawn for this release: main's zero-residual-allowance regression is preserved. Each conversion approves only its input amount, then verifies both the backing change and complete allowance consumption. A remaining allowance reverts the whole transaction. This narrows the standing dependency without abandoning direct settlement; the table below remeasures this exact-approval version.
 

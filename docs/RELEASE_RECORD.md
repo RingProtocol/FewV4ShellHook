@@ -51,7 +51,7 @@ Record one row per registered Shell Pool.
 |---|---|---|---|---|---|---|---|
 | `<PAIR>` | `<SHELL_POOL_ID>` | `<LP_POOL_ID>` | `<FEE_AND_TICK>` | `<TXS>` | `<DEPTH>` | `<TOKEN_AMOUNTS>` | `<LIMIT>` |
 
-Do not publish duplicate Shell metadata for the same raw origin pair and FewToken LP. Record native ETH and WETH routes separately.
+Record every Shell Pool separately, including fee and tick metadata, when multiple Shell Pools share one FewToken LP. Record native ETH and WETH routes separately.
 
 ## 5. Acceptance and rollback
 
