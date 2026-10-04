@@ -26,7 +26,7 @@ The Hook uses Uniswap v4 custom accounting. It returns the complete Shell swap d
 | Shell Pool | Initialized by the owner so a third party cannot preempt the permanent metadata price |
 | FewToken LP | Explicitly registered by the owner for that Shell PoolId |
 | Wrappers | Both must be the canonical wrappers returned by the configured FewFactory |
-| LP Hook | Allowed only if it does not use `beforeSwapReturnDelta` or `afterSwapReturnDelta` |
+| LP Hook | Preserved, including `beforeSwapReturnDelta` and `afterSwapReturnDelta`; it must settle its own PoolManager deltas |
 | Liquidity | The FewToken LP must be initialized and have active liquidity |
 | Trade types | Both directions; exact input and exact output; full fill only |
 | Route removal | Stops the route; no automatic pool fallback |

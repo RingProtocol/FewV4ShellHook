@@ -1015,18 +1015,25 @@ contract FewV4ShellHookTest is Test {
         assertEq(IERC20(address(tokenB)).allowance(address(hook), fewB), 0);
     }
 
-    function test_setLpPool_rejectsSwapReturnDeltaHooks() public {
-        address beforeDeltaHook = address(uint160(Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG));
-        PoolKey memory beforeKey = lpKey;
-        beforeKey.hooks = IHooks(beforeDeltaHook);
-        vm.expectRevert(abi.encodeWithSelector(FewV4ShellHook.LpHookReturnsDeltaUnsupported.selector, beforeDeltaHook));
-        hook.setLpPool(shellKey, beforeKey);
+    function test_setLpPool_supportsSwapReturnDeltaHooks() public {
+        uint160 hookFlags = uint160(
+            Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
+                | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
+        );
+        address hookAddr = address(hookFlags);
+        vm.etch(hookAddr, vm.getDeployedCode("test/mocks/MockNoOpHook.sol:MockNoOpHook"));
 
-        address afterDeltaHook = address(uint160(Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG));
-        PoolKey memory afterKey = lpKey;
-        afterKey.hooks = IHooks(afterDeltaHook);
-        vm.expectRevert(abi.encodeWithSelector(FewV4ShellHook.LpHookReturnsDeltaUnsupported.selector, afterDeltaHook));
-        hook.setLpPool(shellKey, afterKey);
+        PoolKey memory hookedKey = lpKey;
+        hookedKey.hooks = IHooks(hookAddr);
+        manager.initialize(hookedKey, SQRT_PRICE_1_1);
+        hook.setLpPool(shellKey, hookedKey);
+        _addLpLiquidityWithKey(hookedKey, LP_LIQUIDITY);
+
+        _swapAsUser(true, -int256(SWAP_AMOUNT));
+        assertEq(IERC20(address(tokenA)).balanceOf(address(hook)), 0, "hook tokenA balance");
+        assertEq(IERC20(address(tokenB)).balanceOf(address(hook)), 0, "hook tokenB balance");
+        assertEq(IERC20(fewA).balanceOf(address(hook)), 0, "hook fewA balance");
+        assertEq(IERC20(fewB).balanceOf(address(hook)), 0, "hook fewB balance");
     }
 
     function test_setLpPool_emptyKeyRemovesRegistration() public {

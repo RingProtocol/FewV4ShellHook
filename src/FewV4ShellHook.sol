@@ -68,7 +68,6 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyLock, IAgg
     error DependencyHasNoCode(address dependency);
     error QuoterPoolManagerMismatch(address expected, address actual);
     error UnexpectedNativeSender(address sender);
-    error LpHookReturnsDeltaUnsupported(address hook);
     error LpRouteAlreadyRegistered(PoolId lpPoolId, PoolId shellPoolId);
     error LpSwapDirectionMismatch();
     error LpSwapPartialFill(uint256 actual, uint256 expected);
@@ -148,8 +147,8 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyLock, IAgg
 
     /// @notice Registers an explicit lp pool for the given shell pool. The `lpPoolKey`'s
     ///         currency0/currency1 must be FewToken wrappers for shellPoolKey.currency0/currency1
-    ///         respectively (in either order). The `lpPoolKey.hooks` is preserved, so a hooked lp
-    ///         pool may be registered unless it returns swap deltas that this shell cannot settle.
+    ///         respectively (in either order). The `lpPoolKey.hooks` is preserved, including its
+    ///         swap-return deltas, which PoolManager accounts separately from this shell's delta.
     ///         Passing an empty `lpPoolKey` (currency0 == address(0)) removes the registration and
     ///         disables swaps for that shell pool until a new LP pool is registered.
     // Registration deliberately validates initialization, hook flags, canonical wrappers,
@@ -169,11 +168,6 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyLock, IAgg
             delete lpPools[shellPoolId];
             emit LpPoolRemoved(shellPoolId);
             return;
-        }
-
-        uint160 lpHookFlags = uint160(address(lpPoolKey.hooks));
-        if (lpHookFlags & (Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG) != 0) {
-            revert LpHookReturnsDeltaUnsupported(address(lpPoolKey.hooks));
         }
 
         // Validate: lpPoolKey.currency0/currency1 must be FewToken wrappers for shellPoolKey's

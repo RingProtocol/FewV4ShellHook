@@ -10,7 +10,7 @@ The Shell Pool is the Uniswap entry and settlement layer. It is not the executio
 - Duplicate Shell Pools cannot advertise the same FewToken LP for the same origin-token pair from one Hook. Native ETH and WETH modes remain separate.
 - Both LP currencies must be the canonical FewFactory wrappers for the Shell currencies.
 - Callers and `hookData` cannot choose or override the execution pool.
-- LP hooks using `beforeSwapReturnDelta` or `afterSwapReturnDelta` are rejected.
+- LP hooks may use `beforeSwapReturnDelta` or `afterSwapReturnDelta`; PoolManager accounts their deltas separately and returns the Shell's adjusted delta.
 - Removing a mapping disables that Shell route; there is no automatic fallback.
 - The FewToken LP must be initialized, have active liquidity and fully fill the requested exact-input or exact-output trade.
 
