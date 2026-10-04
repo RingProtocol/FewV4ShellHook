@@ -16,12 +16,11 @@ import {IWETH9} from "v4-periphery/src/interfaces/external/IWETH9.sol";
 /// @notice Read-only preflight and CREATE2 address mining for FewV4ShellHook.
 ///
 /// Required:
-///   HOOK_OWNER
+///   ETH_PRIVATE_KEY, HOOK_OWNER
 ///
 /// Optional Ethereum defaults:
 ///   V4_POOL_MANAGER, FEW_FACTORY, WETH9, V4_QUOTER
 contract MineFewV4ShellHookAddress is Script {
-    address internal constant CREATE2_DEPLOYER = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
     address internal constant V4_POOL_MANAGER_DEFAULT = 0x000000000004444c5dc75cB358380D2e3dE08A90;
     address internal constant FEW_FACTORY_DEFAULT = 0x7D86394139bf1122E82FDF45Bb4e3b038A4464DD;
     address internal constant WETH9_DEFAULT = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
@@ -33,6 +32,8 @@ contract MineFewV4ShellHookAddress is Script {
         address wethAddress = vm.envOr("WETH9", WETH9_DEFAULT);
         address v4QuoterAddress = vm.envOr("V4_QUOTER", V4_QUOTER_DEFAULT);
         address owner = vm.envAddress("HOOK_OWNER");
+        address deployer = vm.addr(_privateKey());
+        address helper = vm.computeCreateAddress(deployer, vm.getNonce(deployer));
 
         bytes memory constructorArgs = abi.encode(
             IPoolManager(poolManagerAddress),
@@ -43,9 +44,11 @@ contract MineFewV4ShellHookAddress is Script {
         );
         uint160 flags = _flags();
         (address expectedHook, bytes32 salt) =
-            HookMiner.find(CREATE2_DEPLOYER, flags, type(FewV4ShellHook).creationCode, constructorArgs);
+            HookMiner.find(helper, flags, type(FewV4ShellHook).creationCode, constructorArgs);
 
         console2.log("=== FewV4ShellHook preflight ===");
+        console2.log("deployer:     ", deployer);
+        console2.log("HookDeployer: ", helper);
         console2.log("poolManager:  ", poolManagerAddress);
         console2.log("fewFactory:   ", factoryAddress);
         console2.log("weth9:        ", wethAddress);
@@ -54,9 +57,18 @@ contract MineFewV4ShellHookAddress is Script {
         console2.log("HOOK_SALT:");
         console2.logBytes32(salt);
         console2.log("EXPECTED_HOOK_ADDRESS:", expectedHook);
+        console2.log("Save these values as HOOK_SALT and EXPECTED_HOOK_ADDRESS.");
     }
 
     function _flags() internal pure returns (uint160) {
         return uint160(Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.BEFORE_INITIALIZE_FLAG);
+    }
+
+    function _privateKey() internal view returns (uint256) {
+        string memory raw = vm.envString("ETH_PRIVATE_KEY");
+        bytes memory value = bytes(raw);
+        if (value.length == 64) return vm.parseUint(string.concat("0x", raw));
+        require(value.length == 66 && value[0] == "0" && value[1] == "x", "invalid ETH_PRIVATE_KEY");
+        return vm.parseUint(raw);
     }
 }

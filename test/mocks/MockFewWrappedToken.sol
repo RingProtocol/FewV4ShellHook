@@ -15,6 +15,8 @@ contract MockFewWrappedToken is IFewWrappedToken {
     uint256 public totalSupply;
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
+    bool public wrapShortfall;
+    bool public unwrapShortfall;
 
     constructor(address underlyingToken) {
         underlying = underlyingToken;
@@ -27,16 +29,29 @@ contract MockFewWrappedToken is IFewWrappedToken {
     }
 
     function wrap(uint256 amount) external override returns (uint256) {
+        return wrapTo(amount, msg.sender);
+    }
+
+    function setShortfalls(bool newWrapShortfall, bool newUnwrapShortfall) external {
+        wrapShortfall = newWrapShortfall;
+        unwrapShortfall = newUnwrapShortfall;
+    }
+
+    function wrapTo(uint256 amount, address to) public virtual override returns (uint256) {
         // Pull underlying from caller.
-        _transferFromUnderlying(msg.sender, address(this), amount);
-        _mint(msg.sender, amount);
+        _transferFromUnderlying(msg.sender, address(this), wrapShortfall ? amount - 1 : amount);
+        _mint(to, amount);
         return amount;
     }
 
     function unwrap(uint256 amount) external override returns (uint256) {
+        return unwrapTo(amount, msg.sender);
+    }
+
+    function unwrapTo(uint256 amount, address to) public virtual override returns (uint256) {
         _burn(msg.sender, amount);
         // Send underlying to caller.
-        _sendUnderlying(msg.sender, amount);
+        _sendUnderlying(to, unwrapShortfall ? amount - 1 : amount);
         return amount;
     }
 
