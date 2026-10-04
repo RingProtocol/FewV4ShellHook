@@ -30,9 +30,9 @@ The Hook uses Uniswap v4 custom accounting. It returns the complete Shell swap d
 | Liquidity | The FewToken LP must be initialized and have active liquidity |
 | Trade types | Both directions; exact input and exact output; full fill only |
 | Route removal | Stops the route; no automatic pool fallback |
-| Duplicate route | One FewToken LP may back only one Shell Pool for the same raw origin-token pair in this Hook; ETH and WETH modes use distinct route keys |
+| Shared LP | Multiple Shell Pools, including different fee/tick metadata, may register the same FewToken LP |
 
-The Hook can serve many Shell Pools from one address. Each Shell Pool has its own registered FewToken LP. Callers and `hookData` cannot choose a different execution pool. Duplicate Shell Pools with different fee/tick metadata cannot advertise the same LP for the same origin-token pair.
+The Hook can serve many Shell Pools from one address. Each Shell Pool has its own registered route, while multiple Shell Pools may share one FewToken LP. Callers and `hookData` cannot choose a different execution pool.
 
 ## Pricing and discovery
 
