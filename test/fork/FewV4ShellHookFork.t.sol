@@ -153,7 +153,7 @@ contract FewV4ShellHookForkTest is Test {
             hooks: IHooks(address(0))
         });
 
-        // Initialize shell pool at the lp pool's price (must be initialized before setLpPool).
+        // Initialize shell pool at the lp pool's price (anyone can initialize).
         (uint160 lpSqrtPrice,,,) = manager.getSlot0(LP_POOL_ID);
         uint160 shellInitPrice = orderAligned ? lpSqrtPrice : _invertPrice(lpSqrtPrice);
         manager.initialize(shellKey, shellInitPrice);

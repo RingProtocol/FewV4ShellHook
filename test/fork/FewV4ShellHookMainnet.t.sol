@@ -12,6 +12,8 @@ import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {ModifyLiquidityParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
+import {PoolModifyLiquidityTest} from "@uniswap/v4-core/src/test/PoolModifyLiquidityTest.sol";
 import {IPositionManager} from "v4-periphery/src/interfaces/IPositionManager.sol";
 import {IV4Quoter} from "v4-periphery/src/interfaces/IV4Quoter.sol";
 import {IV4Router} from "v4-periphery/src/interfaces/IV4Router.sol";
@@ -59,10 +61,12 @@ contract FewV4ShellHookMainnetTest is Test {
     bool internal forked;
     IPoolManager internal manager;
     FewV4ShellHook internal candidate;
+    V4Quoter internal quoter;
     PoolKey internal fewKey;
     PoolKey internal ethShellKey;
     PoolKey internal wethShellKey;
     PoolKey internal liveEthShellKey;
+    PoolKey internal plainEthKey;
     uint256 internal readySnapshot;
 
     receive() external payable {}
@@ -79,7 +83,7 @@ contract FewV4ShellHookMainnetTest is Test {
         assertEq(address(liveEthShellKey.hooks), LIVE_SHELL_HOOK);
         assertGt(manager.getLiquidity(fewKey.toId()), 0);
 
-        V4Quoter quoter = new V4Quoter(manager);
+        quoter = new V4Quoter(manager);
         uint160 flags =
             uint160(Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.BEFORE_INITIALIZE_FLAG);
         bytes memory args =
@@ -106,10 +110,32 @@ contract FewV4ShellHookMainnetTest is Test {
         });
 
         (uint160 fewPrice,,,) = manager.getSlot0(fewKey.toId());
+        // Initialize shell pools (anyone can initialize)
         manager.initialize(ethShellKey, _mappedShellPrice(ethShellKey, fewPrice));
         manager.initialize(wethShellKey, _mappedShellPrice(wethShellKey, fewPrice));
         candidate.setLpPool(ethShellKey, fewKey);
         candidate.setLpPool(wethShellKey, fewKey);
+
+        plainEthKey = PoolKey({
+            currency0: Currency.wrap(address(0)),
+            currency1: Currency.wrap(WBTC),
+            fee: 75,
+            tickSpacing: 1,
+            hooks: IHooks(address(0))
+        });
+        uint160 plainInitPrice = _mappedShellPrice(ethShellKey, fewPrice);
+        manager.initialize(plainEthKey, plainInitPrice);
+
+        PoolModifyLiquidityTest lpTester = new PoolModifyLiquidityTest(manager);
+        vm.deal(address(lpTester), 100 ether);
+        deal(WBTC, address(lpTester), 1e8);
+        vm.prank(address(lpTester));
+        IERC20(WBTC).approve(address(lpTester), type(uint256).max);
+        lpTester.modifyLiquidity(
+            plainEthKey,
+            ModifyLiquidityParams({tickLower: -887220, tickUpper: 887220, liquidityDelta: 1e17, salt: bytes32(0)}),
+            ""
+        );
 
         vm.deal(USER, 100 ether);
         deal(WETH, USER, 100 ether);
@@ -155,6 +181,36 @@ contract FewV4ShellHookMainnetTest is Test {
                 emit log_named_uint("release candidate Universal Router gas", candidateGas);
                 assertLt(candidateGas, liveGas);
                 emit log_named_uint("saved gas", liveGas - candidateGas);
+                assertTrue(vm.revertToState(snapshot));
+            }
+        }
+    }
+
+    function test_plainV4Swap_gasComparison() public requireFork {
+        uint128 plainEthAmount = 0.001 ether;
+        uint128 plainWbtcAmount = 100;
+
+        for (uint256 direction; direction < 2; ++direction) {
+            for (uint256 kind; kind < 2; ++kind) {
+                bool zeroForOne = direction == 0;
+                bool exactIn = kind == 0;
+                Currency input = zeroForOne ? plainEthKey.currency0 : plainEthKey.currency1;
+                Currency output = zeroForOne ? plainEthKey.currency1 : plainEthKey.currency0;
+                Currency specifiedCurrency = exactIn ? input : output;
+                uint128 amount = Currency.unwrap(specifiedCurrency) == WBTC ? plainWbtcAmount : plainEthAmount;
+
+                uint256 snapshot = vm.snapshotState();
+                uint256 plainGas = _plainExecuteAndMeasure(plainEthKey, zeroForOne, exactIn, amount);
+                assertTrue(vm.revertToState(snapshot));
+
+                uint256 candidateGas =
+                    _executeAndMeasure(ethShellKey, IAggregatorHook(address(candidate)), zeroForOne, exactIn, amount);
+
+                emit log_named_uint("plain V4 (no hook) gas", plainGas);
+                emit log_named_uint("candidate hook gas", candidateGas);
+                emit log_named_uint(
+                    "hook overhead", candidateGas > plainGas ? candidateGas - plainGas : plainGas - candidateGas
+                );
                 assertTrue(vm.revertToState(snapshot));
             }
         }
@@ -225,6 +281,46 @@ contract FewV4ShellHookMainnetTest is Test {
         assertEq(output.balanceOf(USER) - outputBefore, minOrExact);
         assertEq(IERC20(Currency.unwrap(fewKey.currency0)).balanceOf(address(candidate)), candidateFew0Before);
         assertEq(IERC20(Currency.unwrap(fewKey.currency1)).balanceOf(address(candidate)), candidateFew1Before);
+    }
+
+    function _plainExecuteAndMeasure(PoolKey memory key, bool zeroForOne, bool exactIn, uint128 amount)
+        internal
+        returns (uint256 gasUsed)
+    {
+        Currency input = zeroForOne ? key.currency0 : key.currency1;
+        Currency output = zeroForOne ? key.currency1 : key.currency0;
+
+        uint256 unspecified;
+        if (exactIn) {
+            (unspecified,) = quoter.quoteExactInputSingle(
+                IV4Quoter.QuoteExactSingleParams({
+                    poolKey: key, zeroForOne: zeroForOne, exactAmount: amount, hookData: bytes("")
+                })
+            );
+        } else {
+            (unspecified,) = quoter.quoteExactOutputSingle(
+                IV4Quoter.QuoteExactSingleParams({
+                    poolKey: key, zeroForOne: zeroForOne, exactAmount: amount, hookData: bytes("")
+                })
+            );
+        }
+
+        uint256 maxOrExact = exactIn ? amount : unspecified;
+        uint256 minOrExact = exactIn ? unspecified : amount;
+
+        uint256 inputBefore = input.balanceOf(USER);
+        uint256 outputBefore = output.balanceOf(USER);
+
+        bytes[] memory inputs = _routerInputs(key, zeroForOne, exactIn, amount, unspecified);
+        uint256 value = input.isAddressZero() ? maxOrExact : 0;
+
+        vm.prank(USER);
+        IUniversalRouter(UNIVERSAL_ROUTER).execute{value: value}(hex"10", inputs, block.timestamp + 1);
+        Vm.Gas memory measured = vm.lastCallGas();
+        gasUsed = measured.gasTotalUsed;
+
+        assertEq(inputBefore - input.balanceOf(USER), maxOrExact);
+        assertEq(output.balanceOf(USER) - outputBefore, minOrExact);
     }
 
     function _routerInputs(PoolKey memory key, bool zeroForOne, bool exactIn, uint128 amount, uint256 unspecified)

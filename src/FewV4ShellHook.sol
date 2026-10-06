@@ -309,11 +309,19 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyLock, IAgg
         });
     }
 
-    function _beforeInitialize(address sender, PoolKey calldata key, uint160) internal override returns (bytes4) {
+    function _beforeInitialize(
+        address,
+        /*sender*/
+        PoolKey calldata key,
+        uint160
+    )
+        internal
+        override
+        returns (bytes4)
+    {
         // A shell pool's slot0 is metadata rather than the executable price, but it is permanent.
-        // Restrict initialization so an unrelated account cannot front-run the reviewed PoolKey
-        // with a misleading price before the owner configures its canonical FewToken LP route.
-        if (sender != owner) revert NotOwner(sender, owner);
+        // The actual execution price comes from the owner-configured FewToken LP pool, so
+        // initialization is open to all users for better UX.
         PoolId id = key.toId();
         initedPools[id] = key;
         initedPoolIds.push(id);

@@ -66,9 +66,10 @@ Do not fund or announce the Hook until explorer verification matches the local b
 ## 5. Create a Shell Pool and FewToken LP
 
 1. Create or select the canonical FewToken LP and add a small canary amount of active liquidity.
-2. From the Hook owner Safe, call PoolManager `initialize()` for the origin-token Shell Pool with the new Hook address. Use a static fee. The initial Shell price is metadata only, but it is permanent, so derive and review it immediately before execution. Calls from any other sender revert. Execution price comes from the registered FewToken LP.
-3. Add only the origin-token inventory needed for settlement testing. Shell liquidity does not improve the FewToken quote or earn the redirected swap fee.
-4. Record both complete PoolKeys: currency order, fee, tick spacing and Hook address.
+2. From the Hook owner Safe, call `setLpPool()` to register the FewToken LP for the intended Shell Pool. This is the critical owner-only step that controls execution routing.
+3. Any user can now initialize the Shell Pool via Uniswap frontend by adding liquidity. The initial Shell price is metadata only; execution price comes from the registered FewToken LP.
+4. Add only the origin-token inventory needed for settlement testing. Shell liquidity does not improve the FewToken quote or earn the redirected swap fee.
+5. Record both complete PoolKeys: currency order, fee, tick spacing and Hook address.
 
 Multiple Shell Pools with different fee/tick metadata may share the same FewToken LP. Record each Shell Pool independently and avoid double-counting their shared LP depth. Native ETH and WETH Shell Pools may also share one FewToken LP.
 
@@ -114,7 +115,7 @@ BROADCAST_CONFIG=true forge script script/ConfigureLpPool.s.sol:ConfigureLpPool 
 Before increasing capital:
 
 1. `owner()` equals the intended Safe and `pendingOwner()` is zero.
-2. Only the owner Safe can initialize a Shell Pool; an unrelated address fails.
+2. Any address can initialize a Shell Pool; only the owner can configure LP routing via `setLpPool()`.
 3. `lpPools(shellPoolId)` returns the reviewed LP PoolId, Hook, fee, tick spacing, ordering and wrappers. This release keeps main's cached-field getter ABI; use `LpPoolSet` to recover the original complete PoolKey.
 4. Every intended Shell PoolId has its reviewed LP mapping, including any fee/tick variants sharing the same LP.
 5. `pseudoTotalValueLocked(shellPoolId)` is nonzero and tracks the FewToken LP's active liquidity.

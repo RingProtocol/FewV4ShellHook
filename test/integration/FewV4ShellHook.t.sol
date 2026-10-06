@@ -172,7 +172,7 @@ contract FewV4ShellHookTest is Test {
             hooks: IHooks(address(0))
         });
 
-        // Initialize shell pool before registering lp pool (setLpPool requires the shell pool to be initialized).
+        // Initialize shell pool before registering lp pool (anyone can initialize).
         manager.initialize(shellKey, SQRT_PRICE_1_1);
 
         // Register the lp pool explicitly (no auto-inference).
@@ -1276,16 +1276,15 @@ contract FewV4ShellHookTest is Test {
         assertEq(hook.initedPoolCount(), 2);
     }
 
-    function test_beforeInitialize_revertsForNonOwner() public {
-        PoolKey memory unauthorizedShell = shellKey;
-        unauthorizedShell.fee = 3000;
+    function test_beforeInitialize_allowsAnyAddress() public {
+        PoolKey memory anotherShell = shellKey;
+        anotherShell.fee = 3000;
 
         vm.prank(USER);
-        // PoolManager wraps hook callback failures in its ERC-7751 error envelope.
-        vm.expectRevert();
-        manager.initialize(unauthorizedShell, SQRT_PRICE_1_1);
+        // Any address can now initialize a shell pool
+        manager.initialize(anotherShell, SQRT_PRICE_1_1);
 
-        assertEq(hook.initedPoolCount(), 1, "unauthorized pool not recorded");
+        assertEq(hook.initedPoolCount(), 2, "new pool should be recorded");
     }
 
     function test_quoteRejectsInvalidAmountsWithoutTruncation() public {

@@ -3,7 +3,7 @@ broadcast/
 cache/
 out/
 out_soldb/
-testresult/
+#testresult/
 
 # Dependency directories
 node_modules/
