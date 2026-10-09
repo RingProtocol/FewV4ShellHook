@@ -7,10 +7,10 @@ The Shell Pool is the Uniswap entry and settlement layer. It is not the executio
 ## Route restrictions
 
 - The owner initializes each Shell Pool and registers one complete FewToken PoolKey for its PoolId. This prevents an unrelated account from permanently front-running the reviewed PoolKey with a misleading Shell price.
-- Duplicate Shell Pools cannot advertise the same FewToken LP for the same origin-token pair from one Hook. Native ETH and WETH modes remain separate.
+- Multiple Shell Pools, including different fee or tick-spacing variants for one origin-token pair, may share the same FewToken LP.
 - Both LP currencies must be the canonical FewFactory wrappers for the Shell currencies.
 - Callers and `hookData` cannot choose or override the execution pool.
-- LP hooks using `beforeSwapReturnDelta` or `afterSwapReturnDelta` are rejected.
+- LP hooks may use `beforeSwapReturnDelta` or `afterSwapReturnDelta`; PoolManager accounts their deltas separately and returns the Shell's adjusted delta.
 - Removing a mapping disables that Shell route; there is no automatic fallback.
 - The FewToken LP must be initialized, have active liquidity and fully fill the requested exact-input or exact-output trade.
 
@@ -40,6 +40,6 @@ The Hook grants only the current input amount to its canonical wrapper. The wrap
 
 ## Validation status
 
-After main integration, all 107 tests across the four local and fixed-block suites passed on October 3, 2026, with no skips. They cover both directions, exact input/output, native ETH/WETH, quote parity, inventory/backing failures, under-transfer rollback, forced ETH dust, fake wrappers, dependency mismatch, unauthorized initialization, duplicate routes, nested-Hook reentrancy, route replacement/removal, zero remaining allowance and residual balances. A fixed-block Ethereum fork executes 24 Universal Router combinations across ETH/WBTC and WETH/WBTC and verifies slippage rollback; the three Router tests also passed with `--isolate`. The historical latest-state run at block `26,087,184` on September 30, 2026 does not certify the updated candidate.
+After main integration, all 107 tests across the four local and fixed-block suites passed on October 3, 2026, with no skips. They cover both directions, exact input/output, native ETH/WETH, quote parity, inventory/backing failures, under-transfer rollback, forced ETH dust, fake wrappers, dependency mismatch, unauthorized initialization, shared LP routes, nested-Hook reentrancy, route replacement/removal, zero remaining allowance and residual balances. A fixed-block Ethereum fork executes 24 Universal Router combinations across ETH/WBTC and WETH/WBTC and verifies slippage rollback; the three Router tests also passed with `--isolate`. The historical latest-state run at block `26,087,184` on September 30, 2026 does not certify the updated candidate.
 
 The code is unaudited. Source review, deployment approval, route discovery and default frontend selection remain separate review steps.

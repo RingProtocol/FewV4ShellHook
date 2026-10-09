@@ -70,7 +70,7 @@ Do not fund or announce the Hook until explorer verification matches the local b
 3. Add only the origin-token inventory needed for settlement testing. Shell liquidity does not improve the FewToken quote or earn the redirected swap fee.
 4. Record both complete PoolKeys: currency order, fee, tick spacing and Hook address.
 
-Do not create a second Shell Pool with different fee/tick metadata for the same raw origin-token pair and FewToken LP. The contract rejects that duplicate route. Native ETH and WETH Shell Pools may share one FewToken LP because they are separate user-facing currencies.
+Multiple Shell Pools with different fee/tick metadata may share the same FewToken LP. Record each Shell Pool independently and avoid double-counting their shared LP depth. Native ETH and WETH Shell Pools may also share one FewToken LP.
 
 Liquidity can use the Uniswap interface where it supports the selected Hook. Shell Pool initialization and the Hook-to-LP mapping are owner transactions and are not normal LP actions.
 
@@ -116,7 +116,7 @@ Before increasing capital:
 1. `owner()` equals the intended Safe and `pendingOwner()` is zero.
 2. Only the owner Safe can initialize a Shell Pool; an unrelated address fails.
 3. `lpPools(shellPoolId)` returns the reviewed LP PoolId, Hook, fee, tick spacing, ordering and wrappers. This release keeps main's cached-field getter ABI; use `LpPoolSet` to recover the original complete PoolKey.
-4. The route-registration key points to that Shell Pool and no duplicate Shell advertises the same LP for the same origin pair.
+4. Every intended Shell PoolId has its reviewed LP mapping, including any fee/tick variants sharing the same LP.
 5. `pseudoTotalValueLocked(shellPoolId)` is nonzero and tracks the FewToken LP's active liquidity.
 6. `quote()` works in both directions for exact input and exact output.
 7. Complete Universal Router calldata succeeds through `eth_call` with user slippage limits.

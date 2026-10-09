@@ -14,9 +14,8 @@ The release candidate is suitable for public source review and a capped canary a
 | Wrapper retains a usable allowance after conversion | Registration grants no approval; each swap approves its exact input and reverts unless the allowance is fully consumed |
 | Third party front-runs Shell initialization with a misleading permanent price | `_beforeInitialize` accepts only the current owner, expected to be a Safe |
 | Wrong constructor dependency | Every dependency must contain code; V4Quoter must point to the configured PoolManager |
-| Same LP is advertised by duplicate Shell metadata | Duplicate routes for the same raw origin-token pair and FewToken LP are rejected within the Hook |
 | Owner removes a mapping but trading continues elsewhere | No automatic LP inference; a missing mapping makes the route unavailable |
-| Nested LP Hook changes custom-accounting deltas | LP hooks with before/after swap return-delta permissions are rejected |
+| Nested LP Hook changes custom-accounting deltas | PoolManager accounts LP Hook deltas to that Hook and returns the adjusted Shell delta; the LP Hook must settle its own deltas |
 | Nested Hook or token callback reenters Shell swap | Official v4-periphery transient `ReentrancyLock` blocks nested Shell swaps |
 | Partial fill changes economics | Exact input/output must fill completely or revert |
 | Unbacked wrap or unwrap | Return amounts, temporary balances and the wrapper's exact backing delta are checked; any mismatch rolls back the LP swap |
@@ -39,10 +38,10 @@ The main integration removes cached unlimited approvals. The Hook grants only th
 - Malicious wrapper with a plausible underlying.
 - Lying canonical-wrapper mock that under-transfers backing on wrap or unwrap, including full rollback.
 - Constructor dependency without code and V4Quoter/PoolManager mismatch.
-- Duplicate Shell metadata for one origin pair and LP, plus removal/re-registration.
+- Multiple Shell Pools with different fee metadata sharing one LP, plus removal/re-registration.
 - Unexpected direct ETH transfer.
 - Forced ETH dust cannot change native-swap accounting; it remains trapped because the Hook deliberately has no sweep function.
-- Inner LP hooks with return-delta permissions.
+- Inner LP hooks with before/after swap return-delta permissions.
 - Nested LP Hook reentrancy attempt.
 - Route removal and restoration.
 - Two-step ownership, unauthorized initialization and unauthorized admin calls.
@@ -67,7 +66,7 @@ The earlier latest-state fork run used block `26,087,184` on September 30, 2026;
 5. **PoolManager inventory.** Settlement depends on physical origin-token inventory in PoolManager or a router that prepays before swap. A quote, route discovery and an executable full transaction are separate checks.
 6. **Routing approval.** Public source, Registry inclusion, UniRoute discovery and default frontend selection are separate external decisions.
 7. **Privileged initialization.** Only the owner can initialize a Shell Pool. This closes third-party price front-running, but it makes Safe availability part of adding a new pool. Losing the owner key does not stop existing routes.
-8. **Cross-deployment duplicates.** The duplicate-route guard covers one Hook deployment. Release operations must not publish equivalent duplicate routes from a second Hook address.
+8. **Shared LP discovery.** Multiple Shell Pools may intentionally share one LP. Discovery and accounting systems must avoid treating the shared LP liquidity as independent depth for every Shell.
 9. **Forced ETH dust.** `SELFDESTRUCT` can force ETH into any contract. It does not affect the tested native settlement baseline, but the dust cannot be recovered because this Hook has no sweep authority.
 
 ## Review still required before uncapped capital

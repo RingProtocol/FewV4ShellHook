@@ -927,46 +927,22 @@ contract FewV4ShellHookTest is Test {
         assertEq(address(_hooks), address(lpKey.hooks), "hooks");
     }
 
-    function test_setLpPool_rejectsDuplicateRouteAcrossShellPools() public {
+    function test_setLpPool_allowsSameLpAcrossShellPools() public {
         PoolKey memory anotherShell = shellKey;
         anotherShell.fee = 3000;
         anotherShell.tickSpacing = 60;
         manager.initialize(anotherShell, SQRT_PRICE_1_1);
-
-        vm.expectRevert(
-            abi.encodeWithSelector(FewV4ShellHook.LpRouteAlreadyRegistered.selector, lpKey.toId(), shellKey.toId())
-        );
-        hook.setLpPool(anotherShell, lpKey);
-    }
-
-    function test_setLpPool_removalClearsDuplicateGuard() public {
-        PoolKey memory anotherShell = shellKey;
-        anotherShell.fee = 3000;
-        anotherShell.tickSpacing = 60;
-        manager.initialize(anotherShell, SQRT_PRICE_1_1);
-
-        PoolKey memory emptyKey = PoolKey({
-            currency0: Currency.wrap(address(0)),
-            currency1: Currency.wrap(address(0)),
-            fee: 0,
-            tickSpacing: 0,
-            hooks: IHooks(address(0))
-        });
-        hook.setLpPool(shellKey, emptyKey);
         hook.setLpPool(anotherShell, lpKey);
 
-        (,,,,, bool oldSet,,) = hook.lpPools(shellKey.toId());
-        (,,,,, bool newSet,,) = hook.lpPools(anotherShell.toId());
-        assertFalse(oldSet, "old shell still registered");
-        assertTrue(newSet, "new shell not registered");
-        bytes32 routeKey = keccak256(
-            abi.encode(lpKey.toId(), Currency.unwrap(anotherShell.currency0), Currency.unwrap(anotherShell.currency1))
-        );
-        assertTrue(hook.routeRegistered(routeKey), "duplicate guard missing");
-        assertEq(PoolId.unwrap(hook.shellPoolForRoute(routeKey)), PoolId.unwrap(anotherShell.toId()), "reverse route");
+        (PoolId firstLpPoolId,,,,, bool firstSet,,) = hook.lpPools(shellKey.toId());
+        (PoolId secondLpPoolId,,,,, bool secondSet,,) = hook.lpPools(anotherShell.toId());
+        assertTrue(firstSet, "first shell not registered");
+        assertTrue(secondSet, "second shell not registered");
+        assertEq(PoolId.unwrap(firstLpPoolId), PoolId.unwrap(lpKey.toId()));
+        assertEq(PoolId.unwrap(secondLpPoolId), PoolId.unwrap(lpKey.toId()));
     }
 
-    function test_setLpPool_replacementUpdatesCachedRouteAndDuplicateGuard() public {
+    function test_setLpPool_replacementUpdatesCachedRoute() public {
         PoolKey memory replacement = lpKey;
         replacement.fee = 3000;
         replacement.tickSpacing = 60;
@@ -977,13 +953,6 @@ contract FewV4ShellHookTest is Test {
         assertEq(PoolId.unwrap(cachedId), PoolId.unwrap(replacement.toId()), "stale cached PoolId");
         assertEq(cachedFee, replacement.fee, "stale cached fee");
         assertEq(cachedSpacing, replacement.tickSpacing, "stale cached spacing");
-        bytes32 oldKey = keccak256(abi.encode(lpKey.toId(), Currency.unwrap(currency0), Currency.unwrap(currency1)));
-        bytes32 newKey =
-            keccak256(abi.encode(replacement.toId(), Currency.unwrap(currency0), Currency.unwrap(currency1)));
-        assertFalse(hook.routeRegistered(oldKey), "old duplicate guard not cleared");
-        assertEq(PoolId.unwrap(hook.shellPoolForRoute(oldKey)), bytes32(0), "old reverse route not cleared");
-        assertTrue(hook.routeRegistered(newKey), "new duplicate guard missing");
-        assertEq(PoolId.unwrap(hook.shellPoolForRoute(newKey)), PoolId.unwrap(shellKey.toId()));
     }
 
     function test_setLpPool_revertsForNonOwner() public {
@@ -1015,18 +984,25 @@ contract FewV4ShellHookTest is Test {
         assertEq(IERC20(address(tokenB)).allowance(address(hook), fewB), 0);
     }
 
-    function test_setLpPool_rejectsSwapReturnDeltaHooks() public {
-        address beforeDeltaHook = address(uint160(Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG));
-        PoolKey memory beforeKey = lpKey;
-        beforeKey.hooks = IHooks(beforeDeltaHook);
-        vm.expectRevert(abi.encodeWithSelector(FewV4ShellHook.LpHookReturnsDeltaUnsupported.selector, beforeDeltaHook));
-        hook.setLpPool(shellKey, beforeKey);
+    function test_setLpPool_supportsSwapReturnDeltaHooks() public {
+        uint160 hookFlags = uint160(
+            Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
+                | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
+        );
+        address hookAddr = address(hookFlags);
+        vm.etch(hookAddr, vm.getDeployedCode("test/mocks/MockNoOpHook.sol:MockNoOpHook"));
 
-        address afterDeltaHook = address(uint160(Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG));
-        PoolKey memory afterKey = lpKey;
-        afterKey.hooks = IHooks(afterDeltaHook);
-        vm.expectRevert(abi.encodeWithSelector(FewV4ShellHook.LpHookReturnsDeltaUnsupported.selector, afterDeltaHook));
-        hook.setLpPool(shellKey, afterKey);
+        PoolKey memory hookedKey = lpKey;
+        hookedKey.hooks = IHooks(hookAddr);
+        manager.initialize(hookedKey, SQRT_PRICE_1_1);
+        hook.setLpPool(shellKey, hookedKey);
+        _addLpLiquidityWithKey(hookedKey, LP_LIQUIDITY);
+
+        _swapAsUser(true, -int256(SWAP_AMOUNT));
+        assertEq(IERC20(address(tokenA)).balanceOf(address(hook)), 0, "hook tokenA balance");
+        assertEq(IERC20(address(tokenB)).balanceOf(address(hook)), 0, "hook tokenB balance");
+        assertEq(IERC20(fewA).balanceOf(address(hook)), 0, "hook fewA balance");
+        assertEq(IERC20(fewB).balanceOf(address(hook)), 0, "hook fewB balance");
     }
 
     function test_setLpPool_emptyKeyRemovesRegistration() public {
