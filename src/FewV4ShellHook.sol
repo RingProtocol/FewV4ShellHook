@@ -148,7 +148,7 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyLock, IAgg
     // Registration deliberately validates initialization, hook flags, canonical wrappers and
     // currency order in one bounded admin path.
     // slither-disable-next-line cyclomatic-complexity
-    function setLpPool(PoolKey calldata shellPoolKey, PoolKey calldata lpPoolKey) public virtual onlyOwner {
+    function setLpPool(PoolKey calldata shellPoolKey, PoolKey calldata lpPoolKey) external onlyOwner {
         PoolId shellPoolId = shellPoolKey.toId();
         if (address(initedPools[shellPoolId].hooks) == address(0)) revert ShellPoolNotInitialized(shellPoolId);
 

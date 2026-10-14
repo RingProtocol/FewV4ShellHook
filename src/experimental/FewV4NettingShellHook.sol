@@ -7,7 +7,6 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IUnlockCallback} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
 import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
-import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
 import {IWETH9} from "v4-periphery/src/interfaces/external/IWETH9.sol";
 import {IV4Quoter} from "v4-periphery/src/interfaces/IV4Quoter.sol";
@@ -21,6 +20,8 @@ import {LpRouteLib} from "../libraries/LpRouteLib.sol";
 /// @notice Research implementation that settles Shell swaps from prefunded PoolManager ERC-6909 claims.
 /// @dev Each swap changes four claim balances instead of wrapping and unwrapping immediately. The owner
 ///      periodically converts accumulated origin claims and FewToken claims in one PoolManager unlock.
+///      Canonical-wrapper checks are inherited: the base `setLpPool` already rejects non-canonical
+///      wrappers, so no registration hook is overridden here.
 ///      This contract is intentionally kept under `experimental`: it does not yet implement per-pool
 ///      inventory quotas, pause controls, keeper roles, or multi-provider accounting.
 contract FewV4NettingShellHook is FewV4ShellHook, IUnlockCallback {
@@ -32,7 +33,6 @@ contract FewV4NettingShellHook is FewV4ShellHook, IUnlockCallback {
     error InvalidClaimRecipient();
     error InsufficientClaim(Currency currency, uint256 available, uint256 required);
     error ClaimBalanceMismatch(Currency currency, uint256 expected, uint256 actual);
-    error NonCanonicalWrapper(address wrapper, address underlying, address canonicalWrapper);
 
     event ClaimDeposited(address indexed currency, uint256 amount);
     event ClaimWithdrawn(address indexed currency, address indexed recipient, uint256 amount);
@@ -53,18 +53,9 @@ contract FewV4NettingShellHook is FewV4ShellHook, IUnlockCallback {
         FewV4ShellHook(manager, factory, wrappedNative, quoter, initialOwner)
     {}
 
-    /// @notice Registers only canonical FewFactory wrappers as the execution pool for this netting hook.
-    function setLpPool(PoolKey calldata shellPoolKey, PoolKey calldata lpPoolKey) public override onlyOwner {
-        if (Currency.unwrap(lpPoolKey.currency0) != address(0)) {
-            _requireCanonicalWrapper(Currency.unwrap(lpPoolKey.currency0));
-            _requireCanonicalWrapper(Currency.unwrap(lpPoolKey.currency1));
-        }
-        super.setLpPool(shellPoolKey, lpPoolKey);
-    }
-
     /// @notice Deposits owner inventory into PoolManager and records it as a claim owned by this hook.
     /// @dev ERC-20 callers approve this hook first. Native claims require msg.value == amount.
-    function depositClaim(Currency currency, uint256 amount) external payable onlyOwner nonReentrant {
+    function depositClaim(Currency currency, uint256 amount) external payable onlyOwner isNotLocked {
         if (amount == 0) revert InvalidClaimAmount();
         if (currency.isAddressZero()) {
             if (msg.value != amount) revert InvalidClaimAmount();
@@ -77,7 +68,7 @@ contract FewV4NettingShellHook is FewV4ShellHook, IUnlockCallback {
     }
 
     /// @notice Withdraws unused claim inventory to an owner-selected recipient.
-    function withdrawClaim(Currency currency, address recipient, uint256 amount) external onlyOwner nonReentrant {
+    function withdrawClaim(Currency currency, address recipient, uint256 amount) external onlyOwner isNotLocked {
         if (amount == 0) revert InvalidClaimAmount();
         if (recipient == address(0)) revert InvalidClaimRecipient();
         _runClaimRequest(RequestKind.Withdraw, currency, recipient, amount);
@@ -85,13 +76,13 @@ contract FewV4NettingShellHook is FewV4ShellHook, IUnlockCallback {
     }
 
     /// @notice Uses accumulated origin claims to wrap once and replenish FewToken claims.
-    function rebalanceOriginToFew(Currency origin, address fewToken, uint256 amount) external onlyOwner nonReentrant {
+    function rebalanceOriginToFew(Currency origin, address fewToken, uint256 amount) external onlyOwner isNotLocked {
         _validatePair(origin, fewToken, amount);
         _runClaimRequest(RequestKind.OriginToFew, origin, fewToken, amount);
     }
 
     /// @notice Uses accumulated FewToken claims to unwrap once and replenish origin claims.
-    function rebalanceFewToOrigin(Currency origin, address fewToken, uint256 amount) external onlyOwner nonReentrant {
+    function rebalanceFewToOrigin(Currency origin, address fewToken, uint256 amount) external onlyOwner isNotLocked {
         _validatePair(origin, fewToken, amount);
         _runClaimRequest(RequestKind.FewToOrigin, origin, fewToken, amount);
     }
@@ -104,7 +95,7 @@ contract FewV4NettingShellHook is FewV4ShellHook, IUnlockCallback {
         Currency depletedOrigin,
         address accumulatedFew,
         uint256 unwrapAmount
-    ) external onlyOwner nonReentrant {
+    ) external onlyOwner isNotLocked {
         _validatePair(accumulatedOrigin, depletedFew, wrapAmount);
         _validatePair(depletedOrigin, accumulatedFew, unwrapAmount);
         if (Currency.unwrap(accumulatedOrigin) == Currency.unwrap(depletedOrigin)) revert InvalidClaimRequest();
@@ -204,51 +195,47 @@ contract FewV4NettingShellHook is FewV4ShellHook, IUnlockCallback {
     }
 
     function _depositClaim(Currency currency, uint256 amount) private {
-        uint256 beforeClaim = claimBalance(currency);
         _settleExact(currency, amount);
-        poolManager.mint(address(this), currency.toId(), amount);
-        _requireClaimBalance(currency, beforeClaim + amount);
+        _mintClaim(currency, amount);
     }
 
     function _withdrawClaim(Currency currency, address recipient, uint256 amount) private {
-        uint256 beforeClaim = claimBalance(currency);
+        _burnClaim(currency, amount);
+        poolManager.take(currency, recipient, amount);
+    }
+
+    /// @dev Claim bookkeeping is verified on each side separately: keeping the expected balance in a
+    ///      narrow scope is what the settlement helpers need to stay clear of the stack limit.
+    function _burnClaim(Currency currency, uint256 amount) private {
+        uint256 before = claimBalance(currency);
         _requireClaim(currency, amount);
         poolManager.burn(address(this), currency.toId(), amount);
-        poolManager.take(currency, recipient, amount);
-        _requireClaimBalance(currency, beforeClaim - amount);
+        _requireClaimBalance(currency, before - amount);
+    }
+
+    function _mintClaim(Currency currency, uint256 amount) private {
+        uint256 before = claimBalance(currency);
+        poolManager.mint(address(this), currency.toId(), amount);
+        _requireClaimBalance(currency, before + amount);
     }
 
     function _originClaimToFewClaim(Currency origin, address fewToken, uint256 amount) private {
         Currency few = Currency.wrap(fewToken);
-        uint256 originBefore = claimBalance(origin);
-        uint256 fewBefore = claimBalance(few);
-        _requireClaim(origin, amount);
-
-        poolManager.burn(address(this), origin.toId(), amount);
+        _burnClaim(origin, amount);
         poolManager.take(origin, address(this), amount);
-        _wrapExact(origin, fewToken, amount);
-        _settleExact(few, amount);
-        poolManager.mint(address(this), few.toId(), amount);
-
-        _requireClaimBalance(origin, originBefore - amount);
-        _requireClaimBalance(few, fewBefore + amount);
+        // Wrap directly into the PoolManager and settle there, reusing the base's measured checks.
+        _wrapAndSettle(origin, fewToken, amount, origin.balanceOfSelf());
+        _mintClaim(few, amount);
         emit OriginWrapped(Currency.unwrap(origin), fewToken, amount);
     }
 
     function _fewClaimToOriginClaim(Currency origin, address fewToken, uint256 amount) private {
         Currency few = Currency.wrap(fewToken);
-        uint256 originBefore = claimBalance(origin);
-        uint256 fewBefore = claimBalance(few);
-        _requireClaim(few, amount);
-
-        poolManager.burn(address(this), few.toId(), amount);
+        _burnClaim(few, amount);
         poolManager.take(few, address(this), amount);
-        _unwrapExact(fewToken, origin, amount);
-        _settleExact(origin, amount);
-        poolManager.mint(address(this), origin.toId(), amount);
-
-        _requireClaimBalance(few, fewBefore - amount);
-        _requireClaimBalance(origin, originBefore + amount);
+        // Unwrap straight to the PoolManager and settle there, reusing the base's measured checks.
+        _unwrapAndSettle(fewToken, origin, amount, few.balanceOfSelf());
+        _mintClaim(origin, amount);
         emit FewTokenUnwrapped(fewToken, Currency.unwrap(origin), amount);
     }
 
@@ -256,16 +243,9 @@ contract FewV4NettingShellHook is FewV4ShellHook, IUnlockCallback {
         if (amount == 0 || fewToken.code.length == 0) revert InvalidClaimAmount();
         address underlying = origin.isAddressZero() ? address(weth) : Currency.unwrap(origin);
         address canonical = fewFactory.getWrappedToken(underlying);
-        if (canonical != fewToken || IFewWrappedToken(fewToken).token() != underlying) {
-            revert NonCanonicalWrapper(fewToken, underlying, canonical);
-        }
-    }
-
-    function _requireCanonicalWrapper(address fewToken) private view {
-        if (fewToken.code.length == 0) revert InvalidClaimRequest();
-        address underlying = IFewWrappedToken(fewToken).token();
-        address canonical = fewFactory.getWrappedToken(underlying);
-        if (canonical != fewToken) revert NonCanonicalWrapper(fewToken, underlying, canonical);
+        if (canonical != fewToken) revert NonCanonicalWrapper(fewToken, canonical);
+        address wrappedUnderlying = IFewWrappedToken(fewToken).token();
+        if (wrappedUnderlying != underlying) revert WrapperUnderlyingMismatch(fewToken, underlying, wrappedUnderlying);
     }
 
     function _requireClaim(Currency currency, uint256 amount) private view {

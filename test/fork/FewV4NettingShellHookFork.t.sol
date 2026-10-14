@@ -221,13 +221,10 @@ contract FewV4NettingShellHookForkTest is Test {
             hooks: IHooks(address(0))
         });
 
+        // The base registration path is what rejects a look-alike wrapper: no netting override needed.
         address rejectedUnderlying = LookalikeWrapper(first).token();
         address canonical = IFewFactory(FEW_FACTORY).getWrappedToken(rejectedUnderlying);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                FewV4NettingShellHook.NonCanonicalWrapper.selector, first, rejectedUnderlying, canonical
-            )
-        );
+        vm.expectRevert(abi.encodeWithSelector(FewV4ShellHook.NonCanonicalWrapper.selector, first, canonical));
         nettingHook.setLpPool(nettingShellKey, fakeKey);
     }
 
