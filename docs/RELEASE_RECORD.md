@@ -9,11 +9,11 @@ Complete this file from the exact clean commit selected for deployment. Do not r
 | Release commit | `<COMMIT_SHA>` |
 | Repository | `https://github.com/RingProtocol/FewV4ShellHook` |
 | Solidity | `0.8.26` |
-| Foundry | `<FOUNDRY_VERSION>` |
+| Foundry | `1.5.1-stable (b0a9dd9)` |
 | Optimizer | `enabled, 200 runs, via IR` |
-| Runtime size | `16,385 bytes` for the main-integrated local candidate; remeasure after the final commit |
+| Runtime size | `15,871 bytes` after merging main commit `3713ea7` on October 9, 2026; constructor-bound runtime hash must be measured for the actual deployment |
 | Runtime codehash | `<RUNTIME_CODEHASH>` |
-| Test result | `107 passed, 0 failed, 0 skipped` across four suites after main integration on October 3, 2026; fixed blocks `25,833,244` and `26,069,215`; three Universal Router tests also passed with `--isolate`; historical latest-state evidence at block `26,087,184` is not a validation of this updated candidate |
+| Test result | `106 passed, 0 failed, 0 skipped` across four suites on October 9, 2026 using the committed fork configuration; main removed the obsolete LP swap-delta rejection test; format and build passed; earlier latest-state and isolated-router runs are historical evidence |
 | Final diff approved by | `<APPROVER>` |
 
 ## 2. Immutable configuration
