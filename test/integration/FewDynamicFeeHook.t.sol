@@ -2,6 +2,7 @@
 pragma solidity 0.8.26;
 
 import {FewV4ShellHookTest} from "./FewV4ShellHook.t.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {FewDynamicFeeHook} from "../../src/FewDynamicFeeHook.sol";
 import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
@@ -18,11 +19,65 @@ import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {LpOwner} from "../../src/base/LpOwner.sol";
 import {BeforeSwapDelta} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
+import {PoolSwapTest} from "@uniswap/v4-core/src/test/PoolSwapTest.sol";
 
 /// @dev Inherits existing Shell regressions unchanged; dynamic scenarios install a separate LP.
 contract FewDynamicFeeHookTest is FewV4ShellHookTest {
     using PoolIdLibrary for PoolKey;
     FewDynamicFeeHook internal dynamicHook;
+
+    function test_gas_shellRouteFewPoolVersusDynamicFeeFewPool() public {
+        // Baseline: shell pool is registered to a regular Few v4 pool.
+        manager.initialize(lpKey, SQRT_PRICE_1_1);
+        _addLpLiquidity(LP_LIQUIDITY);
+        address w0 = Currency.unwrap(lpKey.currency0);
+        address w1 = Currency.unwrap(lpKey.currency1);
+        deal(address(tokenA), USER, 10e18);
+        deal(address(tokenB), USER, 10e18);
+        deal(IFewWrappedToken(w0).token(), w0, 100e18);
+        deal(IFewWrappedToken(w1).token(), w1, 100e18);
+        _addCurLiquidity(1e18);
+
+        uint256 snapshot = vm.snapshotState();
+        uint256 regularFewGas = _measureSwap(shellKey, true, -int256(1e18));
+        assertTrue(vm.revertToState(snapshot));
+
+        // Reconfigure the same shell route to an otherwise equivalent Few v4 pool
+        // that runs the dynamic-fee hook, then measure through the same shell entry.
+        _install();
+        deal(IFewWrappedToken(w0).token(), w0, 100e18);
+        deal(IFewWrappedToken(w1).token(), w1, 100e18);
+        _addCurLiquidity(1e18);
+        uint256 dynamicFewGas = _measureSwap(shellKey, true, -int256(1e18));
+        assertTrue(vm.revertToState(snapshot));
+
+        emit log_named_uint("Shell -> regular Few v4 pool gas", regularFewGas);
+        emit log_named_uint("Shell -> FewDynamicFeeHook Few v4 pool gas", dynamicFewGas);
+        emit log_named_uint(
+            "Dynamic fee route additional gas", dynamicFewGas > regularFewGas ? dynamicFewGas - regularFewGas : 0
+        );
+    }
+
+    function _measureSwap(PoolKey memory key, bool zeroForOne, int256 amountSpecified)
+        internal
+        returns (uint256 gasUsed)
+    {
+        PoolSwapTest.TestSettings memory settings =
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
+        vm.prank(USER);
+        swapRouter.swap(
+            key,
+            SwapParams({
+                zeroForOne: zeroForOne,
+                amountSpecified: amountSpecified,
+                sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
+            }),
+            settings,
+            bytes("")
+        );
+        gasUsed = vm.lastCallGas().gasTotalUsed;
+    }
 
     function _install() internal {
         bytes memory args = abi.encode(manager, IFewFactory(address(factory)), address(this));
