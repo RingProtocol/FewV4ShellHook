@@ -457,7 +457,7 @@ contract FewV4ShellHook is BaseHook, LpSettlement, LpOwner, ReentrancyLock, IAgg
 
     /// @dev Verifies the PoolManager holds enough origin token to fulfill the flash conversion
     ///      input leg. Reusing LpInsufficientInventory for a consistent error surface.
-    function _requireSettlementInventory(address token, uint256 amount) internal view {
+    function _requireSettlementInventory(address token, uint256 amount) internal view virtual {
         uint256 available =
             token == address(0) ? address(poolManager).balance : IERC20(token).balanceOf(address(poolManager));
         if (available < amount) revert LpInsufficientInventory(token, available, amount);
